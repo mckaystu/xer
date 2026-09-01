@@ -1,0 +1,9 @@
+dxl_input/
+application_graph.json
+analysis/
+.env
+.env.*
+__pycache__/
+*.pyc
+.venv/
+*.dxl

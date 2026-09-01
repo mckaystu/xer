@@ -1,0 +1,105 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Xer — DXL Graph Explorer</title>
+  <script src="https://unpkg.com/vis-network@9.1.9/standalone/umd/vis-network.min.js"></script>
+  <link rel="stylesheet" href="/static/style.css" />
+</head>
+<body>
+  <header class="header">
+    <div>
+      <h1>Xer Graph Explorer</h1>
+      <p class="subtitle">Domino design relationships — focus, matrix, or full graph</p>
+    </div>
+    <div class="controls" id="headerControls">
+      <label>
+        Graph
+        <select id="graphSelect"></select>
+      </label>
+      <label id="edgeFilterLabel">
+        Relationships
+        <select id="edgeFilter">
+          <option value="LOOKUP_VIA_VIEW">LOOKUP_VIA_VIEW</option>
+          <option value="SELECTS_FORM">SELECTS_FORM</option>
+          <option value="ACCESSES_VIEW">ACCESSES_VIEW</option>
+          <option value="INCLUDES_SUBFORM">INCLUDES_SUBFORM</option>
+          <option value="INVOKES_AGENT">INVOKES_AGENT</option>
+          <option value="REFERENCES_DATABASE">REFERENCES_DATABASE</option>
+          <option value="">All types</option>
+        </select>
+      </label>
+      <label id="focusSelectLabel">
+        Focus on
+        <select id="focusSelect"></select>
+      </label>
+      <label id="layoutLabel">
+        Layout
+        <select id="layoutDirection">
+          <option value="LR">Horizontal</option>
+          <option value="UD">Vertical</option>
+        </select>
+      </label>
+      <label class="checkbox-label" id="aggregateLabel">
+        <input type="checkbox" id="aggregateEdges" checked />
+        Aggregate edges
+      </label>
+      <div class="zoom-controls" id="zoomControls">
+        <button id="zoomInBtn" type="button" title="Zoom in">+</button>
+        <button id="zoomOutBtn" type="button" title="Zoom out">−</button>
+        <button id="fitBtn" type="button" title="Fit to view">Fit</button>
+      </div>
+      <button id="refreshBtn" type="button">Refresh</button>
+    </div>
+  </header>
+
+  <nav class="view-tabs" role="tablist">
+    <button type="button" class="tab" data-view="overview" role="tab" aria-selected="false">Overview</button>
+    <button type="button" class="tab active" data-view="focus" role="tab" aria-selected="true">Focus</button>
+    <button type="button" class="tab" data-view="matrix" role="tab" aria-selected="false">Lookup Matrix</button>
+    <button type="button" class="tab" data-view="graph" role="tab" aria-selected="false">Full Graph</button>
+  </nav>
+
+  <main class="layout">
+    <section class="main-panel overview-panel hidden" id="overviewPanel">
+      <div class="overview-scroll" id="overviewContent">
+        <p class="placeholder">Loading application analysis…</p>
+      </div>
+    </section>
+
+    <section class="main-panel graph-panel" id="graphPanel">
+      <div id="network"></div>
+      <div class="legend" id="legend">
+        <span class="legend-item"><i class="swatch form"></i>Form</span>
+        <span class="legend-item"><i class="swatch subform"></i>Subform</span>
+        <span class="legend-item"><i class="swatch lookup_view"></i>Lookup view</span>
+        <span class="legend-item"><i class="swatch view"></i>View</span>
+        <span class="legend-item"><i class="swatch agent"></i>Agent</span>
+        <span class="legend-item"><i class="swatch script_library"></i>Script lib</span>
+      </div>
+      <p class="caption" id="graphCaption">1-hop neighborhood · Click node for details · Use Lookup Matrix for the full picture</p>
+    </section>
+
+    <section class="main-panel matrix-panel hidden" id="matrixPanel">
+      <div class="matrix-toolbar">
+        <p class="matrix-hint">Forms × lookup views — cell value = number of <code>@DbLookup</code> references. Click a cell to focus.</p>
+        <label class="checkbox-label">
+          <input type="checkbox" id="matrixHideEmpty" checked />
+          Hide empty rows/columns
+        </label>
+      </div>
+      <div class="matrix-scroll" id="matrixScroll">
+        <table id="lookupMatrix" class="lookup-matrix"></table>
+      </div>
+    </section>
+
+    <aside class="detail-panel" id="detailPanel">
+      <h2>Details</h2>
+      <p class="placeholder">Select a node to inspect fields and relationships.</p>
+    </aside>
+  </main>
+
+  <script src="/static/app.js"></script>
+</body>
+</html>
