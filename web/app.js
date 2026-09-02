@@ -127,6 +127,8 @@ const layoutLabel = document.getElementById("layoutLabel");
 const aggregateLabel = document.getElementById("aggregateLabel");
 const zoomControls = document.getElementById("zoomControls");
 const viewTabs = document.querySelectorAll(".view-tabs .tab");
+const dxlUpload = document.getElementById("dxlUpload");
+const uploadStatus = document.getElementById("uploadStatus");
 
 async function fetchJson(url) {
   const res = await fetch(url);
@@ -882,6 +884,39 @@ matrixHideEmpty.addEventListener("change", () => buildLookupMatrix());
 zoomInBtn.addEventListener("click", () => network?.moveTo({ scale: network.getScale() * 1.25, animation: true }));
 zoomOutBtn.addEventListener("click", () => network?.moveTo({ scale: network.getScale() * 0.8, animation: true }));
 fitBtn.addEventListener("click", () => network?.fit({ animation: true }));
+
+dxlUpload?.addEventListener("change", async () => {
+  const file = dxlUpload.files?.[0];
+  if (!file) return;
+
+  uploadStatus.textContent = `Parsing ${file.name}…`;
+  uploadStatus.className = "upload-status";
+
+  const form = new FormData();
+  form.append("file", file);
+
+  try {
+    const res = await fetch("/api/upload", { method: "POST", body: form });
+    const body = await res.json().catch(() => ({}));
+    if (!res.ok) throw new Error(body.detail || res.statusText);
+
+    uploadStatus.textContent = `Stored: ${body.database_title || file.name} (${body.totals?.edges || 0} edges)`;
+    uploadStatus.className = "upload-status success";
+
+    await loadGraphList();
+    graphSelect.value = body.id;
+    currentSummary = null;
+    await loadSelectedGraph();
+    setActiveView("overview");
+  } catch (e) {
+    uploadStatus.textContent = e.message;
+    uploadStatus.className = "upload-status error";
+    showError(e.message);
+  } finally {
+    dxlUpload.value = "";
+  }
+});
+
 refreshBtn.addEventListener("click", async () => {
   try {
     await loadGraphList();

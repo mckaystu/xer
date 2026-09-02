@@ -8,7 +8,7 @@ from pathlib import Path
 from typing import Any
 
 from dotenv import load_dotenv
-from fastapi import FastAPI, HTTPException, Query
+from fastapi import FastAPI, File, HTTPException, Query, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
@@ -30,6 +30,9 @@ app.add_middleware(
 
 class StoreGraphRequest(BaseModel):
     graph: dict[str, Any]
+
+
+MAX_DXL_UPLOAD_BYTES = int(os.getenv("XER_MAX_UPLOAD_MB", "4")) * 1024 * 1024
 
 
 @app.get("/api/health")
@@ -130,6 +133,50 @@ def api_graph_edges(
         return query_edges(graph_id, edge_type=edge_type, source_name=source_name, limit=limit)
     except (ValueError, ConnectionError) as exc:
         raise HTTPException(status_code=503, detail=str(exc)) from exc
+
+
+@app.post("/api/upload")
+async def api_upload_dxl(file: UploadFile = File(...)) -> dict[str, Any]:
+    """Parse an uploaded DXL/XML export, store in Neon, return graph id."""
+    from dxl_parser import build_graph_from_dxl_bytes
+    from graph_synthesis import synthesize
+    from neon_db import store_graph
+
+    filename = file.filename or "upload.dxl"
+    lower = filename.lower()
+    if not lower.endswith((".dxl", ".xml")):
+        raise HTTPException(status_code=400, detail="File must be .dxl or .xml")
+
+    content = await file.read()
+    if not content:
+        raise HTTPException(status_code=400, detail="Empty file")
+    if len(content) > MAX_DXL_UPLOAD_BYTES:
+        limit_mb = MAX_DXL_UPLOAD_BYTES // (1024 * 1024)
+        raise HTTPException(
+            status_code=413,
+            detail=f"File too large (max {limit_mb} MB on this deployment). Parse locally with: python3 dxl_parser.py --store-neon",
+        )
+
+    try:
+        graph = build_graph_from_dxl_bytes(content, filename)
+        graph_id = store_graph(graph)
+    except (ValueError, ConnectionError, RuntimeError) as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    except Exception as exc:
+        raise HTTPException(status_code=422, detail=f"Parse failed: {exc}") from exc
+
+    totals = graph.get("meta", {}).get("totals", {})
+    title = (graph.get("meta", {}).get("source_files") or [{}])[0].get("database_title")
+    summary = synthesize(graph, rules_limit=20)
+    return {
+        "id": graph_id,
+        "filename": filename,
+        "database_title": title,
+        "totals": totals,
+        "errors": graph.get("meta", {}).get("errors", []),
+        "capabilities": len(summary.get("capabilities", [])),
+        "business_rules": len(summary.get("business_rules", [])),
+    }
 
 
 @app.post("/api/graphs")

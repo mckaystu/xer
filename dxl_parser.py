@@ -876,10 +876,11 @@ class ParsedDXLFile:
 
 class DXLFileParser:
     def parse_file(self, path: Path) -> ParsedDXLFile:
-        source_file = path.name
         raw_text = path.read_text(encoding="utf-8", errors="replace")
+        return self.parse_text(raw_text, path.name, path)
 
-        database_title: str | None = None
+    def parse_text(self, raw_text: str, source_file: str, path: Path | None = None) -> ParsedDXLFile:
+        path = path or Path(source_file)
         database_path: str | None = None
         forms: list[FormModel] = []
         subforms: list[FormModel] = []
@@ -1043,7 +1044,15 @@ class ApplicationGraphBuilder:
         for pattern in patterns:
             files.extend(sorted(self.input_dir.glob(pattern)))
         files = sorted(set(files))
+        parsed_files = [self.parser.parse_file(path) for path in files]
+        return self.build_from_parsed(parsed_files, input_label=str(self.input_dir))
 
+    def build_from_parsed(
+        self,
+        parsed_files: list[ParsedDXLFile],
+        *,
+        input_label: str,
+    ) -> dict[str, Any]:
         all_forms: list[FormModel] = []
         all_subforms: list[FormModel] = []
         all_views: list[ViewModel] = []
@@ -1053,9 +1062,15 @@ class ApplicationGraphBuilder:
         source_files: list[dict[str, Any]] = []
         global_errors: list[dict[str, str]] = []
 
-        for path in files:
-            parsed = self.parser.parse_file(path)
-            db_id = database_id_from_source(path.name, parsed.database_path)
+        for parsed in parsed_files:
+            db_id = database_id_from_source(parsed.path.name, parsed.database_path)
+            rel_path = parsed.path.name
+            if self.input_dir.exists() and parsed.path.is_absolute():
+                try:
+                    rel_path = str(parsed.path.relative_to(self.input_dir))
+                except ValueError:
+                    rel_path = parsed.path.name
+
             all_forms.extend(parsed.forms)
             all_subforms.extend(parsed.subforms)
             all_views.extend(parsed.views)
@@ -1065,7 +1080,7 @@ class ApplicationGraphBuilder:
 
             source_files.append(
                 {
-                    "path": str(path.relative_to(self.input_dir)),
+                    "path": rel_path,
                     "database_id": db_id,
                     "database_title": parsed.database_title,
                     "database_path": parsed.database_path,
@@ -1080,7 +1095,7 @@ class ApplicationGraphBuilder:
                 }
             )
             for err in parsed.parse_errors:
-                global_errors.append({"file": path.name, "error": err})
+                global_errors.append({"file": parsed.path.name, "error": err})
 
         databases = [
             {
@@ -1105,7 +1120,7 @@ class ApplicationGraphBuilder:
             "meta": {
                 "generated_at": datetime.now(timezone.utc).isoformat(),
                 "parser_version": PARSER_VERSION,
-                "input_directory": str(self.input_dir),
+                "input_directory": input_label,
                 "source_files": source_files,
                 "databases": databases,
                 "totals": {
@@ -1296,6 +1311,15 @@ class ApplicationGraphBuilder:
         if code.language == "java":
             return "java_logic"
         return "general_formula"
+
+
+def build_graph_from_dxl_bytes(content: bytes, filename: str) -> dict[str, Any]:
+    """Parse a single DXL/XML upload and return an application graph dict."""
+    parser = DXLFileParser()
+    raw_text = content.decode("utf-8", errors="replace")
+    parsed = parser.parse_text(raw_text, filename)
+    builder = ApplicationGraphBuilder(XER_ROOT / "upload")
+    return builder.build_from_parsed([parsed], input_label=f"upload:{filename}")
 
 
 # ---------------------------------------------------------------------------
