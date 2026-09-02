@@ -143,13 +143,14 @@ def api_store_graph(body: StoreGraphRequest) -> dict[str, str]:
     return {"id": graph_id}
 
 
-@app.get("/")
-def index() -> FileResponse:
-    return FileResponse(WEB_DIR / "index.html")
+# Local dev only — Vercel serves public/ statically (VERCEL env is set automatically).
+if not os.getenv("VERCEL"):
+    @app.get("/")
+    def index() -> FileResponse:
+        return FileResponse(WEB_DIR / "index.html")
 
-
-if WEB_DIR.exists():
-    app.mount("/static", StaticFiles(directory=WEB_DIR), name="static")
+    if WEB_DIR.exists():
+        app.mount("/static", StaticFiles(directory=WEB_DIR), name="static")
 
 
 def main() -> None:
@@ -157,7 +158,7 @@ def main() -> None:
 
     host = os.getenv("XER_API_HOST", "127.0.0.1")
     port = int(os.getenv("XER_API_PORT", "8765"))
-    uvicorn.run("api:app", host=host, port=port, reload=False)
+    uvicorn.run("server:app", host=host, port=port, reload=False)
 
 
 if __name__ == "__main__":

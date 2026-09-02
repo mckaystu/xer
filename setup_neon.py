@@ -65,7 +65,7 @@ def main() -> int:
         print(f"  Title: {graph.get('meta', {}).get('source_files', [{}])[0].get('database_title', 'n/a')}")
         print(f"  Edges: {totals.get('edges', 0)}")
         print("\nNext: start the explorer")
-        print("  uv run uvicorn api:app --host 127.0.0.1 --port 8765")
+        print("  uv run uvicorn server:app --host 127.0.0.1 --port 8765")
         print("  Open http://127.0.0.1:8765")
         return 0
 

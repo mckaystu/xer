@@ -902,6 +902,6 @@ viewTabs.forEach((tab) => {
       await loadSelectedGraph();
     }
   } catch (e) {
-    showError(`API error: ${e.message}. Start the server with: python3 api.py`);
+    showError(`API error: ${e.message}. Start the server with: uvicorn server:app`);
   }
 })();
