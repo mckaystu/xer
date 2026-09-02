@@ -1,5 +1,6 @@
 {
   "$schema": "https://openapi.vercel.sh/vercel.json",
+  "buildCommand": "mkdir -p public/static && cp web/index.html public/index.html && cp web/app.js web/style.css public/static/",
   "installCommand": "pip install -r requirements.txt",
   "functions": {
     "api/index.py": {
@@ -7,8 +8,6 @@
     }
   },
   "rewrites": [
-    { "source": "/api/(.*)", "destination": "/api/index.py" },
-    { "source": "/static/(.*)", "destination": "/web/$1" },
-    { "source": "/", "destination": "/web/index.html" }
+    { "source": "/api/(.*)", "destination": "/api/index.py" }
   ]
 }

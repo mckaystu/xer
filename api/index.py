@@ -15,8 +15,7 @@ _module = importlib.util.module_from_spec(_spec)
 assert _spec.loader is not None
 _spec.loader.exec_module(_module)
 
-app = _module.app
-
 from mangum import Mangum  # noqa: E402
 
-handler = Mangum(app, lifespan="off")
+# Export handler only — do NOT export `app` or Vercel routes all traffic to FastAPI.
+handler = Mangum(_module.app, lifespan="off")
