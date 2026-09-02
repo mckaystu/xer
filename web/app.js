@@ -192,6 +192,53 @@ function populateFocusSelect() {
   }
 }
 
+function syncEdgeFilterForGraph() {
+  if (!currentViz || !edgeFilter) return;
+
+  const counts = {};
+  currentViz.edges.forEach((e) => {
+    counts[e.type] = (counts[e.type] || 0) + 1;
+  });
+
+  const preferred = [
+    "",
+    "LOOKUP_VIA_VIEW",
+    "SELECTS_FORM",
+    "ACCESSES_VIEW",
+    "INCLUDES_SUBFORM",
+    "USES_SCRIPT_LIBRARY",
+    "INVOKES_AGENT",
+    "REFERENCES_DATABASE",
+    "PARENT_CHILD_REF",
+    "CROSS_DATABASE_LOOKUP",
+  ];
+  const present = Object.keys(counts).sort((a, b) => counts[b] - counts[a]);
+  const options = [""];
+  preferred.slice(1).forEach((t) => {
+    if (counts[t]) options.push(t);
+  });
+  present.forEach((t) => {
+    if (!options.includes(t)) options.push(t);
+  });
+
+  const previous = edgeFilter.value;
+  edgeFilter.innerHTML = options
+    .map((t) => {
+      const label = t ? `${t} (${counts[t] || 0})` : `All types (${currentViz.edges.length})`;
+      return `<option value="${t}">${label}</option>`;
+    })
+    .join("");
+
+  // Keep prior filter only if this graph actually has those edges
+  if (previous && counts[previous]) {
+    edgeFilter.value = previous;
+  } else if (previous && !counts[previous]) {
+    edgeFilter.value = "";
+  } else {
+    edgeFilter.value = "";
+  }
+}
+
 function getFilteredEdges() {
   if (!currentViz) return [];
   const typeFilter = edgeFilter.value;
@@ -346,6 +393,24 @@ function buildNetwork() {
 
   if (network) network.destroy();
   network = new vis.Network(container, data, options);
+
+  // Empty-state hint when filter matches nothing
+  let emptyHint = container.querySelector(".graph-empty-hint");
+  if (!emptyHint) {
+    emptyHint = document.createElement("div");
+    emptyHint.className = "graph-empty-hint";
+    container.appendChild(emptyHint);
+  }
+  if (nodes.length === 0) {
+    const filterLabel = filter || "All types";
+    emptyHint.textContent =
+      `No relationships match “${filterLabel}” for this graph. ` +
+      `Try “All types” or another relationship in the dropdown.`;
+    emptyHint.classList.remove("hidden");
+  } else {
+    emptyHint.classList.add("hidden");
+  }
+
   network.once("afterDrawing", () => {
     network.fit({ animation: { duration: 400, easingFunction: "easeInOutQuad" } });
   });
@@ -366,7 +431,13 @@ function updateCaption() {
     const suffix = focusTargetId ? ` → ${nodeName(focusTargetId)}` : "";
     graphCaption.textContent = `Focus: ${name}${suffix} · ${edgeCount} refs · ${aggCount} edges shown`;
   } else if (activeView === "graph") {
-    graphCaption.textContent = "Full graph — use filters to reduce noise · Aggregate edges recommended";
+    const filter = edgeFilter.value;
+    const edgeCount = getFilteredEdges().length;
+    if (!edgeCount && filter) {
+      graphCaption.textContent = `No “${filter}” edges in this graph — switch Relationships to All types`;
+    } else {
+      graphCaption.textContent = `Full graph · ${edgeCount} edges shown · use filters to reduce noise`;
+    }
   }
 }
 
@@ -1103,6 +1174,7 @@ async function loadSelectedGraph() {
   focusTargetId = null;
   currentSummary = null;
   currentAnalysis = null;
+  syncEdgeFilterForGraph();
   populateFocusSelect();
   loadSummary(id).catch(() => {});
   if (activeView === "overview" || activeView === "rules") {
@@ -1112,6 +1184,7 @@ async function loadSelectedGraph() {
   } else {
     buildNetwork();
   }
+  const edgeTypes = [...new Set((viz.edges || []).map((e) => e.type))];
   detailPanel.innerHTML = `
     <h2>${viz.database_title || "Application"}</h2>
     <div class="meta-grid">
@@ -1120,6 +1193,7 @@ async function loadSelectedGraph() {
       <div><span>Edges</span> ${viz.edges.length}</div>
       <div><span>Lookups</span> ${viz.edges.filter((e) => e.type === "LOOKUP_VIA_VIEW").length}</div>
     </div>
+    <p class="section-hint">Relationship types: ${edgeTypes.length ? edgeTypes.map((t) => t.replace(/_/g, " ")).join(", ") : "none"}</p>
     <p class="placeholder">Click a node, then expand fields in the sidebar to see formulas and business logic.</p>
   `;
 }

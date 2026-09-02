@@ -448,9 +448,28 @@ button:hover {
 #network {
   width: 100%;
   height: calc(100vh - 150px);
+  position: relative;
   background:
     radial-gradient(circle at 1px 1px, #1a1e28 1px, transparent 0) 0 0 / 24px 24px,
     var(--bg);
+}
+
+.graph-empty-hint {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 24px;
+  text-align: center;
+  color: var(--muted);
+  font-size: 0.9rem;
+  pointer-events: none;
+  z-index: 2;
+}
+
+.graph-empty-hint.hidden {
+  display: none;
 }
 
 .legend {
