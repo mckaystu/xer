@@ -3,11 +3,8 @@
   "buildCommand": "mkdir -p public/static && cp web/index.html public/index.html && cp web/app.js web/style.css public/static/",
   "installCommand": "pip install -r requirements.txt",
   "functions": {
-    "api/index.py": {
+    "server.py": {
       "maxDuration": 60
     }
-  },
-  "rewrites": [
-    { "source": "/api/(.*)", "destination": "/api/index.py" }
-  ]
+  }
 }
