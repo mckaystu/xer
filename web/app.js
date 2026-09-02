@@ -98,6 +98,7 @@ const FOCUS_GROUPS = new Set(["form", "subform", "agent", "view", "lookup_view",
 let network = null;
 let currentViz = null;
 let currentSummary = null;
+let currentAnalysis = null;
 let fullGraph = null;
 let activeView = "focus";
 let focusNodeId = null;
@@ -116,6 +117,13 @@ const fitBtn = document.getElementById("fitBtn");
 const graphPanel = document.getElementById("graphPanel");
 const overviewPanel = document.getElementById("overviewPanel");
 const overviewContent = document.getElementById("overviewContent");
+const rulesPanel = document.getElementById("rulesPanel");
+const rulesContent = document.getElementById("rulesContent");
+const rulesSearch = document.getElementById("rulesSearch");
+const rulesFormFilter = document.getElementById("rulesFormFilter");
+const rulesValidationOnly = document.getElementById("rulesValidationOnly");
+const rulesLookupsOnly = document.getElementById("rulesLookupsOnly");
+const rulesCount = document.getElementById("rulesCount");
 const matrixPanel = document.getElementById("matrixPanel");
 const lookupMatrix = document.getElementById("lookupMatrix");
 const matrixHideEmpty = document.getElementById("matrixHideEmpty");
@@ -429,6 +437,194 @@ function buildLookupMatrix() {
   });
 }
 
+function scoreRiskClass(rating) {
+  if (!rating) return "risk-unknown";
+  if (rating.startsWith("Low")) return "risk-low";
+  if (rating.startsWith("Moderate")) return "risk-moderate";
+  return "risk-high";
+}
+
+function renderModernizationCard(scoreObj) {
+  if (!scoreObj) {
+    return `<section class="overview-section"><h2>Modernization Readiness</h2><p class="placeholder">Score not available yet.</p></section>`;
+  }
+  const m = scoreObj.metrics || {};
+  const coupling = m.coupling || {};
+  const cross = m.cross_db || {};
+  const hard = m.hardcoded || {};
+  const orphans = m.orphans || {};
+  const riskClass = scoreRiskClass(scoreObj.risk_rating);
+  const pct = (ratio) => Math.round((ratio || 0) * 100);
+
+  return `
+    <section class="overview-section score-section">
+      <h2>Modernization Readiness</h2>
+      <div class="score-card ${riskClass}">
+        <div class="score-main">
+          <div class="score-ring" data-score="${scoreObj.score}">
+            <span class="score-value">${scoreObj.score}</span>
+            <span class="score-max">/ 100</span>
+          </div>
+          <div class="score-copy">
+            <p class="score-rating">${escapeHtml(scoreObj.risk_rating || "")}</p>
+            <p class="score-hint">Higher = more modernization effort (coupling, cross-DB, hardcoded refs, orphans).</p>
+          </div>
+        </div>
+        <div class="score-metrics">
+          <div class="metric">
+            <div class="metric-head"><span>Max Coupling</span><strong>${coupling.max_degree ?? "—"} deg</strong></div>
+            <div class="metric-bar"><i style="width:${pct(coupling.ratio)}%"></i></div>
+            <p class="metric-sub">${escapeHtml(coupling.max_degree_node || "—")}</p>
+          </div>
+          <div class="metric">
+            <div class="metric-head"><span>Cross-DB Links</span><strong>${cross.cross_db_edges ?? 0} / ${cross.total_edges ?? 0}</strong></div>
+            <div class="metric-bar"><i style="width:${pct(cross.ratio)}%"></i></div>
+          </div>
+          <div class="metric">
+            <div class="metric-head"><span>Hardcoded Refs</span><strong>${hard.count ?? 0}</strong></div>
+            <div class="metric-bar"><i style="width:${pct(hard.ratio)}%"></i></div>
+          </div>
+          <div class="metric">
+            <div class="metric-head"><span>Orphaned Artifacts</span><strong>${orphans.count ?? 0}</strong></div>
+            <div class="metric-bar"><i style="width:${pct(orphans.ratio)}%"></i></div>
+          </div>
+        </div>
+      </div>
+    </section>
+  `;
+}
+
+function flattenRulesRows(catalog) {
+  const rows = [];
+  for (const form of catalog?.forms || []) {
+    for (const field of form.fields || []) {
+      const validation = field.input_validation?.formula || "";
+      const failures = (field.input_validation?.failure_messages || []).join("; ");
+      const lookups = field.lookups || [];
+      const lookupText = lookups
+        .map((l) => [l.function, l.target_database, l.target_view, l.lookup_key].filter(Boolean).join(" "))
+        .join(" | ");
+      rows.push({
+        form: form.form,
+        element_type: form.element_type,
+        database_id: form.database_id,
+        field: field.name,
+        data_type: field.data_type,
+        kind: field.kind || "",
+        default_value: field.default_value || "",
+        validation,
+        failures,
+        translation: field.input_translation || "",
+        hide_when: field.hide_when || "",
+        lookups,
+        lookupText,
+        hasValidation: Boolean(validation),
+        hasLookup: lookups.length > 0,
+      });
+    }
+  }
+  return rows;
+}
+
+function populateRulesFormFilter(catalog) {
+  if (!rulesFormFilter) return;
+  const current = rulesFormFilter.value;
+  const names = (catalog?.forms || []).map((f) => f.form);
+  rulesFormFilter.innerHTML =
+    `<option value="">All forms</option>` +
+    names.map((n) => `<option value="${escapeHtml(n)}">${escapeHtml(n)}</option>`).join("");
+  if (names.includes(current)) rulesFormFilter.value = current;
+}
+
+function renderRulesCatalog() {
+  if (!rulesContent) return;
+  const catalog = currentAnalysis?.business_rules;
+  if (!catalog) {
+    rulesContent.innerHTML = `<p class="placeholder">No business rules catalog available.</p>`;
+    return;
+  }
+
+  populateRulesFormFilter(catalog);
+  const q = (rulesSearch?.value || "").trim().toLowerCase();
+  const formFilter = rulesFormFilter?.value || "";
+  const validationOnly = Boolean(rulesValidationOnly?.checked);
+  const lookupsOnly = Boolean(rulesLookupsOnly?.checked);
+
+  let rows = flattenRulesRows(catalog);
+  rows = rows.filter((r) => {
+    if (formFilter && r.form !== formFilter) return false;
+    if (validationOnly && !r.hasValidation) return false;
+    if (lookupsOnly && !r.hasLookup) return false;
+    if (!q) return true;
+    const hay = [
+      r.form,
+      r.field,
+      r.data_type,
+      r.default_value,
+      r.validation,
+      r.failures,
+      r.translation,
+      r.hide_when,
+      r.lookupText,
+    ]
+      .join(" ")
+      .toLowerCase();
+    return hay.includes(q);
+  });
+
+  if (rulesCount) {
+    rulesCount.textContent = `${rows.length} fields · ${catalog.totals?.fields_with_validation || 0} validations · ${catalog.totals?.lookups || 0} lookups`;
+  }
+
+  if (!rows.length) {
+    rulesContent.innerHTML = `<p class="placeholder">No fields match the current filters.</p>`;
+    return;
+  }
+
+  const byForm = new Map();
+  for (const row of rows) {
+    if (!byForm.has(row.form)) byForm.set(row.form, []);
+    byForm.get(row.form).push(row);
+  }
+
+  const sections = [...byForm.entries()]
+    .map(([formName, formRows]) => {
+      const body = formRows
+        .map((r) => {
+          const lookupHtml = (r.lookups || [])
+            .map(
+              (l) =>
+                `<li><code>${escapeHtml(l.function || "")}</code> → <strong>${escapeHtml(l.target_view || "—")}</strong>${
+                  l.target_database ? ` <span class="muted">(${escapeHtml(l.target_database)})</span>` : ""
+                }${l.lookup_key ? ` key=<code>${escapeHtml(String(l.lookup_key))}</code>` : ""}</li>`
+            )
+            .join("");
+          return `<tr>
+            <td><code>${escapeHtml(r.field)}</code><div class="field-meta">${escapeHtml(r.data_type)}${r.kind ? ` · ${escapeHtml(r.kind)}` : ""}</div></td>
+            <td class="formula-cell">${r.default_value ? `<pre>${escapeHtml(r.default_value)}</pre>` : "—"}</td>
+            <td class="formula-cell">${
+              r.validation
+                ? `<pre>${escapeHtml(r.validation)}</pre>${r.failures ? `<p class="failure-msg">${escapeHtml(r.failures)}</p>` : ""}`
+                : "—"
+            }</td>
+            <td class="formula-cell">${r.hide_when ? `<pre>${escapeHtml(r.hide_when)}</pre>` : "—"}</td>
+            <td>${lookupHtml ? `<ul class="lookup-mini">${lookupHtml}</ul>` : "—"}</td>
+          </tr>`;
+        })
+        .join("");
+      return `<details class="rules-group" open>
+        <summary><strong>${escapeHtml(formName)}</strong> <span class="muted">${formRows.length} fields</span></summary>
+        <table class="rules-table">
+          <thead><tr><th>Field</th><th>Default</th><th>Validation</th><th>Hide-When</th><th>Lookups</th></tr></thead>
+          <tbody>${body}</tbody>
+        </table>
+      </details>`;
+    })
+    .join("");
+
+  rulesContent.innerHTML = sections;
+}
+
 function renderOverview(summary) {
   if (!summary) {
     overviewContent.innerHTML = `<p class="placeholder">No analysis available.</p>`;
@@ -440,6 +636,7 @@ function renderOverview(summary) {
   const rules = summary.business_rules || [];
   const lifecycles = summary.document_lifecycles || [];
   const dbs = summary.databases || [];
+  const scoreCard = renderModernizationCard(currentAnalysis?.modernization_score);
 
   const dbHtml = dbs.length
     ? `<section class="overview-section"><h2>Databases (${dbs.length})</h2><ul class="overview-list">${dbs
@@ -493,12 +690,19 @@ function renderOverview(summary) {
     .map(([k, v]) => `<span class="edge-pill">${k.replace(/_/g, " ")}: ${v}</span>`)
     .join("");
 
+  const catalogTotals = currentAnalysis?.business_rules?.totals;
+  const catalogHint = catalogTotals
+    ? `<p class="overview-sub"><a href="#" id="openRulesTab">${catalogTotals.fields || 0} cataloged fields</a> · ${catalogTotals.fields_with_validation || 0} validations · ${catalogTotals.lookups || 0} lookups</p>`
+    : "";
+
   overviewContent.innerHTML = `
     <div class="overview-header">
       <h2>Application Analysis</h2>
       <p class="overview-sub">${summary.meta?.totals?.business_logic_blocks || 0} logic blocks · ${summary.meta?.totals?.edges || 0} dependency edges</p>
+      ${catalogHint}
       <div class="edge-pills">${edgeSummary}</div>
     </div>
+    ${scoreCard}
     ${dbHtml}
     <section class="overview-section">
       <h2>Business Capabilities</h2>
@@ -514,7 +718,7 @@ function renderOverview(summary) {
       ${hubHtml ? `<h3>Lookup hubs</h3><ul class="overview-list">${hubHtml}</ul>` : ""}
     </section>
     <section class="overview-section">
-      <h2>Business Rules</h2>
+      <h2>Business Rules (synthesis)</h2>
       <div class="rules-list">${rulesHtml}</div>
     </section>
     <section class="overview-section">
@@ -522,17 +726,32 @@ function renderOverview(summary) {
       <div class="lifecycle-list">${lcHtml}</div>
     </section>
   `;
+
+  document.getElementById("openRulesTab")?.addEventListener("click", (e) => {
+    e.preventDefault();
+    setActiveView("rules");
+  });
 }
 
 async function loadSummary(graphId) {
   try {
     overviewContent.innerHTML = `<p class="placeholder">Loading application analysis…</p>`;
-    currentSummary = await fetchJson(`/api/graphs/${graphId}/summary`);
+    const [summary, analysis] = await Promise.all([
+      fetchJson(`/api/graphs/${graphId}/summary`),
+      fetchJson(`/api/graphs/${graphId}/analysis`).catch(() => null),
+    ]);
+    currentSummary = summary;
+    currentAnalysis = analysis;
     if (activeView === "overview") renderOverview(currentSummary);
+    if (activeView === "rules") renderRulesCatalog();
   } catch (err) {
     currentSummary = null;
+    currentAnalysis = null;
     if (activeView === "overview") {
       overviewContent.innerHTML = `<p class="error">Could not load analysis: ${err.message}. Restart the API server to pick up the latest code.</p>`;
+    }
+    if (activeView === "rules") {
+      rulesContent.innerHTML = `<p class="error">Could not load rules: ${err.message}</p>`;
     }
   }
 }
@@ -551,19 +770,25 @@ function setActiveView(view) {
 
   const isMatrix = view === "matrix";
   const isOverview = view === "overview";
-  graphPanel.classList.toggle("hidden", isMatrix || isOverview);
+  const isRules = view === "rules";
+  const hideGraph = isMatrix || isOverview || isRules;
+  graphPanel.classList.toggle("hidden", hideGraph);
   matrixPanel.classList.toggle("hidden", !isMatrix);
   overviewPanel.classList.toggle("hidden", !isOverview);
-  legend?.classList.toggle("hidden", isMatrix || isOverview);
+  rulesPanel?.classList.toggle("hidden", !isRules);
+  legend?.classList.toggle("hidden", hideGraph);
 
   focusSelectLabel.classList.toggle("hidden", view !== "focus");
-  edgeFilterLabel.classList.toggle("hidden", isMatrix || isOverview);
-  layoutLabel.classList.toggle("hidden", isMatrix || isOverview);
-  aggregateLabel.classList.toggle("hidden", isMatrix || isOverview);
-  zoomControls.classList.toggle("hidden", isMatrix || isOverview);
+  edgeFilterLabel.classList.toggle("hidden", hideGraph);
+  layoutLabel.classList.toggle("hidden", hideGraph);
+  aggregateLabel.classList.toggle("hidden", hideGraph);
+  zoomControls.classList.toggle("hidden", hideGraph);
 
   if (isOverview) {
     if (currentSummary) renderOverview(currentSummary);
+    else if (graphSelect.value) loadSummary(graphSelect.value);
+  } else if (isRules) {
+    if (currentAnalysis) renderRulesCatalog();
     else if (graphSelect.value) loadSummary(graphSelect.value);
   } else if (isMatrix) {
     buildLookupMatrix();
@@ -847,10 +1072,11 @@ async function loadSelectedGraph() {
   focusNodeId = null;
   focusTargetId = null;
   currentSummary = null;
+  currentAnalysis = null;
   populateFocusSelect();
   loadSummary(id).catch(() => {});
-  if (activeView === "overview") {
-    /* render when summary returns */
+  if (activeView === "overview" || activeView === "rules") {
+    /* render when summary/analysis returns */
   } else if (activeView === "matrix") {
     buildLookupMatrix();
   } else {
@@ -889,8 +1115,19 @@ dxlUpload?.addEventListener("change", async () => {
   const file = dxlUpload.files?.[0];
   if (!file) return;
 
-  uploadStatus.textContent = `Parsing ${file.name}…`;
+  const sizeMb = file.size / (1024 * 1024);
+  uploadStatus.textContent = `Uploading ${file.name} (${sizeMb.toFixed(2)} MB)…`;
   uploadStatus.className = "upload-status";
+
+  // Soft client hint — Vercel body limit is ~4.5 MB including multipart overhead
+  if (file.size > 4.4 * 1024 * 1024) {
+    const msg = `File is ${sizeMb.toFixed(2)} MB — too large for cloud upload (~4.5 MB max). Run locally: python3 dxl_parser.py --store-neon`;
+    uploadStatus.textContent = msg;
+    uploadStatus.className = "upload-status error";
+    showError(msg);
+    dxlUpload.value = "";
+    return;
+  }
 
   const form = new FormData();
   form.append("file", file);
@@ -898,7 +1135,8 @@ dxlUpload?.addEventListener("change", async () => {
   try {
     const res = await fetch("/api/upload", { method: "POST", body: form });
     const body = await res.json().catch(() => ({}));
-    if (!res.ok) throw new Error(body.detail || res.statusText);
+    const detail = typeof body.detail === "string" ? body.detail : body.detail ? JSON.stringify(body.detail) : res.statusText;
+    if (!res.ok) throw new Error(detail || res.statusText);
 
     uploadStatus.textContent = `Stored: ${body.database_title || file.name} (${body.totals?.edges || 0} edges)`;
     uploadStatus.className = "upload-status success";
@@ -906,6 +1144,7 @@ dxlUpload?.addEventListener("change", async () => {
     await loadGraphList();
     graphSelect.value = body.id;
     currentSummary = null;
+    currentAnalysis = null;
     await loadSelectedGraph();
     setActiveView("overview");
   } catch (e) {
@@ -929,6 +1168,14 @@ refreshBtn.addEventListener("click", async () => {
 viewTabs.forEach((tab) => {
   tab.addEventListener("click", () => setActiveView(tab.dataset.view));
 });
+
+function onRulesFilterChange() {
+  if (activeView === "rules") renderRulesCatalog();
+}
+rulesSearch?.addEventListener("input", onRulesFilterChange);
+rulesFormFilter?.addEventListener("change", onRulesFilterChange);
+rulesValidationOnly?.addEventListener("change", onRulesFilterChange);
+rulesLookupsOnly?.addEventListener("change", onRulesFilterChange);
 
 (async () => {
   try {

@@ -8,8 +8,14 @@ CREATE TABLE IF NOT EXISTS dxl_graphs (
     parser_version  TEXT,
     parsed_at       TIMESTAMPTZ NOT NULL DEFAULT now(),
     totals          JSONB NOT NULL DEFAULT '{}'::jsonb,
-    graph           JSONB NOT NULL
+    graph           JSONB NOT NULL,
+    business_rules  JSONB,
+    modernization_score JSONB
 );
+
+-- Idempotent upgrades for existing Neon databases
+ALTER TABLE dxl_graphs ADD COLUMN IF NOT EXISTS business_rules JSONB;
+ALTER TABLE dxl_graphs ADD COLUMN IF NOT EXISTS modernization_score JSONB;
 
 CREATE INDEX IF NOT EXISTS idx_dxl_graphs_nsf_path ON dxl_graphs (nsf_path);
 CREATE INDEX IF NOT EXISTS idx_dxl_graphs_parsed_at ON dxl_graphs (parsed_at DESC);

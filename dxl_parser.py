@@ -81,6 +81,9 @@ class FieldModel:
     hidewhen: str | None = None
     is_ref: bool = False
     embedded_formulas: list[str] = field(default_factory=list)
+    default_value: str | None = None
+    input_validation: str | None = None
+    input_translation: str | None = None
 
 
 @dataclass
@@ -427,7 +430,17 @@ def parse_field(
     field_type = elem_attr(field_elem, "type")
     kind = elem_attr(field_elem, "kind")
     hidewhen: str | None = None
+    default_value: str | None = None
+    input_validation: str | None = None
+    input_translation: str | None = None
     formulas: list[str] = []
+    known_events = {
+        "hidewhen",
+        "defaultvalue",
+        "inputvalidation",
+        "inputtranslation",
+        "htmlattributes",
+    }
 
     for code_elem in find_descendants(field_elem, "code"):
         event = (elem_attr(code_elem, "event") or "").lower()
@@ -435,9 +448,20 @@ def parse_field(
         if formula_elem is None:
             continue
         body = text_content(formula_elem)
+        if not body:
+            continue
         if event == "hidewhen":
             hidewhen = body
-        elif body:
+        elif event == "defaultvalue":
+            default_value = body
+            formulas.append(body)
+        elif event == "inputvalidation":
+            input_validation = body
+            formulas.append(body)
+        elif event == "inputtranslation":
+            input_translation = body
+            formulas.append(body)
+        elif event not in known_events or not event:
             formulas.append(body)
 
     if not hidewhen and parent_map is not None and pardef_map is not None:
@@ -450,7 +474,8 @@ def parse_field(
             if local_tag(candidate) == "code" and formula_elem in list(candidate.iter()):
                 ancestor_code = candidate
                 break
-        if ancestor_code is not None and (elem_attr(ancestor_code, "event") or "").lower() == "hidewhen":
+        ancestor_event = (elem_attr(ancestor_code, "event") or "").lower() if ancestor_code is not None else ""
+        if ancestor_event in {"hidewhen", "htmlattributes"}:
             continue
         body = text_content(formula_elem)
         if body and body not in formulas:
@@ -463,6 +488,9 @@ def parse_field(
         hidewhen=hidewhen,
         is_ref=name.upper() == "$REF",
         embedded_formulas=formulas,
+        default_value=default_value,
+        input_validation=input_validation,
+        input_translation=input_translation,
     )
 
 
@@ -1178,40 +1206,56 @@ class ApplicationGraphBuilder:
                     }
                 )
 
-        for form in forms:
-            add_blocks("form", form.name, form.source_file, form.database_id, form.code_events)
+        def add_field_blocks(owner_type: str, form: FormModel) -> None:
             for fld in form.fields:
+                field_ctx = f"{owner_type}:{form.name}/field:{fld.name}"
+                event_bodies = [
+                    ("defaultvalue", fld.default_value, "conditional_logic"),
+                    ("inputvalidation", fld.input_validation, "validation"),
+                    ("inputtranslation", fld.input_translation, "conditional_logic"),
+                    ("hidewhen", fld.hidewhen, "hidewhen"),
+                ]
+                seen_bodies = {body for _, body, _ in event_bodies if body}
+                for event, body, category in event_bodies:
+                    if not body:
+                        continue
+                    blocks.append(
+                        {
+                            "category": category,
+                            "owner_type": owner_type,
+                            "owner_name": form.name,
+                            "source_file": form.source_file,
+                            "database_id": form.database_id,
+                            "language": "formula",
+                            "event": event,
+                            "context": field_ctx,
+                            "body": body,
+                        }
+                    )
                 for formula_body in fld.embedded_formulas:
+                    if formula_body in seen_bodies:
+                        continue
                     blocks.append(
                         {
                             "category": "conditional_logic",
-                            "owner_type": "form",
+                            "owner_type": owner_type,
                             "owner_name": form.name,
                             "source_file": form.source_file,
                             "database_id": form.database_id,
                             "language": "formula",
                             "event": "default",
-                            "context": f"form:{form.name}/field:{fld.name}",
+                            "context": field_ctx,
                             "body": formula_body,
                         }
                     )
-                if fld.hidewhen:
-                    blocks.append(
-                        {
-                            "category": "hidewhen",
-                            "owner_type": "form",
-                            "owner_name": form.name,
-                            "source_file": form.source_file,
-                            "database_id": form.database_id,
-                            "language": "formula",
-                            "event": "hidewhen",
-                            "context": f"form:{form.name}/field:{fld.name}",
-                            "body": fld.hidewhen,
-                        }
-                    )
+
+        for form in forms:
+            add_blocks("form", form.name, form.source_file, form.database_id, form.code_events)
+            add_field_blocks("form", form)
 
         for subform in subforms:
             add_blocks("subform", subform.name, subform.source_file, subform.database_id, subform.code_events)
+            add_field_blocks("subform", subform)
 
         for view in views:
             add_blocks("view", view.name, view.source_file, view.database_id, view.code_events)

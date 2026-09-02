@@ -32,7 +32,8 @@ class StoreGraphRequest(BaseModel):
     graph: dict[str, Any]
 
 
-MAX_DXL_UPLOAD_BYTES = int(os.getenv("XER_MAX_UPLOAD_MB", "4")) * 1024 * 1024
+# Vercel serverless request body limit is ~4.5 MB; keep default just under that.
+MAX_DXL_UPLOAD_BYTES = int(float(os.getenv("XER_MAX_UPLOAD_MB", "4.5")) * 1024 * 1024)
 
 
 @app.get("/api/health")
@@ -113,6 +114,21 @@ def api_graph_summary(graph_id: str, rules_limit: int = Query(50, ge=1, le=200))
     return synthesize(row["graph"], rules_limit=rules_limit)
 
 
+@app.get("/api/graphs/{graph_id}/analysis")
+@app.get("/api/applications/{graph_id}/analysis")
+def api_graph_analysis(graph_id: str, refresh: bool = Query(False)) -> dict[str, Any]:
+    """Return BusinessRulesCatalog + modernization score for a stored graph."""
+    from neon_db import ensure_analysis
+
+    try:
+        payload = ensure_analysis(graph_id, force=refresh)
+    except (ValueError, ConnectionError, RuntimeError) as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    if not payload:
+        raise HTTPException(status_code=404, detail="Graph not found")
+    return payload
+
+
 @app.post("/api/synthesize")
 def api_synthesize_local(body: StoreGraphRequest, rules_limit: int = Query(50, ge=1, le=200)) -> dict[str, Any]:
     from graph_synthesis import synthesize
@@ -151,15 +167,21 @@ async def api_upload_dxl(file: UploadFile = File(...)) -> dict[str, Any]:
     if not content:
         raise HTTPException(status_code=400, detail="Empty file")
     if len(content) > MAX_DXL_UPLOAD_BYTES:
-        limit_mb = MAX_DXL_UPLOAD_BYTES // (1024 * 1024)
+        limit_mb = MAX_DXL_UPLOAD_BYTES / (1024 * 1024)
+        size_mb = len(content) / (1024 * 1024)
         raise HTTPException(
             status_code=413,
-            detail=f"File too large (max {limit_mb} MB on this deployment). Parse locally with: python3 dxl_parser.py --store-neon",
+            detail=(
+                f"File is {size_mb:.2f} MB (max {limit_mb:.1f} MB on this deployment). "
+                "Parse locally instead: python3 dxl_parser.py --store-neon"
+            ),
         )
 
     try:
         graph = build_graph_from_dxl_bytes(content, filename)
-        graph_id = store_graph(graph)
+        # Pass raw DXL into scoring so hardcoded path/IP/CN scans see source text
+        text = content.decode("utf-8", errors="ignore")
+        graph_id = store_graph(graph, dxl_sources=[text])
     except (ValueError, ConnectionError, RuntimeError) as exc:
         raise HTTPException(status_code=503, detail=str(exc)) from exc
     except Exception as exc:
@@ -168,6 +190,9 @@ async def api_upload_dxl(file: UploadFile = File(...)) -> dict[str, Any]:
     totals = graph.get("meta", {}).get("totals", {})
     title = (graph.get("meta", {}).get("source_files") or [{}])[0].get("database_title")
     summary = synthesize(graph, rules_limit=20)
+    from neon_db import ensure_analysis
+
+    analysis = ensure_analysis(graph_id) or {}
     return {
         "id": graph_id,
         "filename": filename,
@@ -176,6 +201,9 @@ async def api_upload_dxl(file: UploadFile = File(...)) -> dict[str, Any]:
         "errors": graph.get("meta", {}).get("errors", []),
         "capabilities": len(summary.get("capabilities", [])),
         "business_rules": len(summary.get("business_rules", [])),
+        "rules_catalog_fields": (analysis.get("business_rules") or {}).get("totals", {}).get("fields"),
+        "modernization_score": (analysis.get("modernization_score") or {}).get("score"),
+        "risk_rating": (analysis.get("modernization_score") or {}).get("risk_rating"),
     }
 
 

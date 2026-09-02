@@ -68,9 +68,28 @@ def _extract_database_title(graph: dict[str, Any]) -> str | None:
     return None
 
 
-def store_graph(graph: dict[str, Any], *, init: bool = True) -> str:
+def _compute_analysis(
+    graph: dict[str, Any],
+    *,
+    dxl_sources: list[str] | None = None,
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    from analytics.rules_extractor import extract_business_rules_catalog
+    from analytics.scoring import calculate_modernization_score
+
+    catalog = extract_business_rules_catalog(graph)
+    score = calculate_modernization_score(graph, dxl_sources=dxl_sources or [])
+    return catalog, score
+
+
+def store_graph(
+    graph: dict[str, Any],
+    *,
+    init: bool = True,
+    dxl_sources: list[str] | None = None,
+) -> str:
     """
     Insert a parsed application graph and normalized edges.
+    Also computes and stores business_rules + modernization_score.
     Returns the new graph UUID as a string.
     """
     conn = connect()
@@ -84,15 +103,27 @@ def store_graph(graph: dict[str, Any], *, init: bool = True) -> str:
         parser_version = meta.get("parser_version")
         totals = meta.get("totals", {})
         edges = graph.get("edges", [])
+        business_rules, modernization_score = _compute_analysis(graph, dxl_sources=dxl_sources)
 
         with conn.cursor() as cur:
             cur.execute(
                 """
-                INSERT INTO dxl_graphs (nsf_path, database_title, parser_version, totals, graph)
-                VALUES (%s, %s, %s, %s, %s)
+                INSERT INTO dxl_graphs (
+                    nsf_path, database_title, parser_version, totals, graph,
+                    business_rules, modernization_score
+                )
+                VALUES (%s, %s, %s, %s, %s, %s, %s)
                 RETURNING id
                 """,
-                (nsf_path, database_title, parser_version, Json(totals), Json(graph)),
+                (
+                    nsf_path,
+                    database_title,
+                    parser_version,
+                    Json(totals),
+                    Json(graph),
+                    Json(business_rules),
+                    Json(modernization_score),
+                ),
             )
             graph_id = cur.fetchone()[0]
 
@@ -165,10 +196,12 @@ def list_graphs(limit: int = 50) -> list[dict[str, Any]]:
 def get_graph(graph_id: str) -> dict[str, Any] | None:
     conn = connect()
     try:
+        init_schema(conn)
         with conn.cursor(cursor_factory=RealDictCursor) as cur:
             cur.execute(
                 """
-                SELECT id, nsf_path, database_title, parser_version, parsed_at, totals, graph
+                SELECT id, nsf_path, database_title, parser_version, parsed_at, totals, graph,
+                       business_rules, modernization_score
                 FROM dxl_graphs
                 WHERE id = %s
                 """,
@@ -185,10 +218,56 @@ def get_graph(graph_id: str) -> dict[str, Any] | None:
             "parsed_at": row["parsed_at"].isoformat() if row["parsed_at"] else None,
             "totals": row["totals"],
             "graph": row["graph"],
+            "business_rules": row.get("business_rules"),
+            "modernization_score": row.get("modernization_score"),
         }
     finally:
         conn.close()
 
+def ensure_analysis(
+    graph_id: str,
+    *,
+    dxl_sources: list[str] | None = None,
+    force: bool = False,
+) -> dict[str, Any] | None:
+    """
+    Return analysis payload for a graph, computing and persisting if missing.
+    """
+    row = get_graph(graph_id)
+    if not row:
+        return None
+
+    catalog = row.get("business_rules")
+    score = row.get("modernization_score")
+    if force or not catalog or not score:
+        catalog, score = _compute_analysis(row["graph"], dxl_sources=dxl_sources)
+        conn = connect()
+        try:
+            init_schema(conn)
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    UPDATE dxl_graphs
+                    SET business_rules = %s, modernization_score = %s
+                    WHERE id = %s
+                    """,
+                    (Json(catalog), Json(score), UUID(graph_id)),
+                )
+            conn.commit()
+        except psycopg2.Error as exc:
+            conn.rollback()
+            raise RuntimeError(f"Failed to persist analysis: {exc}") from exc
+        finally:
+            conn.close()
+
+    return {
+        "id": row["id"],
+        "nsf_path": row["nsf_path"],
+        "database_title": row["database_title"],
+        "parsed_at": row["parsed_at"],
+        "business_rules": catalog,
+        "modernization_score": score,
+    }
 
 def get_latest_graph(nsf_path: str | None = None) -> dict[str, Any] | None:
     conn = connect()
