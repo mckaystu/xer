@@ -16,8 +16,9 @@ from dxl_parser import (
     parse_db_database_ref,
     parse_db_func_args,
 )
+from analytics.plain_english import describe_field_rules, humanize_field_name
 
-SCHEMA_VERSION = "1.0"
+SCHEMA_VERSION = "1.1"
 
 RE_FAILURE = re.compile(r'@Failure\s*\(\s*"((?:\\.|[^"\\])*)"', re.I)
 RE_GETVIEW = re.compile(
@@ -230,21 +231,41 @@ def _catalog_field(
             lookups.append(edge_lu)
 
     validation = formulas["input_validation"]
+    failure_messages = _failure_messages(validation)
+    lookups = _dedupe_lookups(lookups)
+    plain = describe_field_rules(
+        field_name=name,
+        data_type=field.get("type"),
+        kind=field.get("kind"),
+        default_value=formulas["default_value"],
+        validation_formula=validation,
+        failure_messages=failure_messages,
+        input_translation=formulas["input_translation"],
+        hide_when=formulas["hide_when"],
+        lookups=lookups,
+    )
     return {
         "name": name,
+        "label": plain["label"],
         "data_type": field.get("type") or "unknown",
         "kind": field.get("kind"),
         "is_ref": bool(field.get("is_ref")),
+        "business_summary": plain["business_summary"],
         "default_value": formulas["default_value"],
+        "default_summary": plain["default_summary"],
         "input_validation": {
             "formula": validation,
-            "failure_messages": _failure_messages(validation),
+            "failure_messages": failure_messages,
+            "summary": plain["validation_summary"],
         }
         if validation
         else None,
         "input_translation": formulas["input_translation"],
+        "translation_summary": plain["translation_summary"],
         "hide_when": formulas["hide_when"],
-        "lookups": _dedupe_lookups(lookups),
+        "hide_summary": plain["hide_summary"],
+        "lookups": lookups,
+        "lookup_summary": plain["lookup_summary"],
     }
 
 

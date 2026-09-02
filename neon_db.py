@@ -233,13 +233,16 @@ def ensure_analysis(
     """
     Return analysis payload for a graph, computing and persisting if missing.
     """
+    from analytics.rules_extractor import SCHEMA_VERSION
+
     row = get_graph(graph_id)
     if not row:
         return None
 
     catalog = row.get("business_rules")
     score = row.get("modernization_score")
-    if force or not catalog or not score:
+    stale = bool(catalog) and catalog.get("schema_version") != SCHEMA_VERSION
+    if force or stale or not catalog or not score:
         catalog, score = _compute_analysis(row["graph"], dxl_sources=dxl_sources)
         conn = connect()
         try:

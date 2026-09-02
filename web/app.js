@@ -509,21 +509,36 @@ function flattenRulesRows(catalog) {
         element_type: form.element_type,
         database_id: form.database_id,
         field: field.name,
+        label: field.label || field.name,
         data_type: field.data_type,
         kind: field.kind || "",
+        business_summary: field.business_summary || "",
         default_value: field.default_value || "",
+        default_summary: field.default_summary || "",
         validation,
+        validation_summary: field.input_validation?.summary || "",
         failures,
         translation: field.input_translation || "",
         hide_when: field.hide_when || "",
+        hide_summary: field.hide_summary || "",
         lookups,
         lookupText,
+        lookup_summary: field.lookup_summary || "",
         hasValidation: Boolean(validation),
         hasLookup: lookups.length > 0,
       });
     }
   }
   return rows;
+}
+
+function renderBizCell(summary, formula, extraHtml = "") {
+  if (!summary && !formula) return "—";
+  const summaryHtml = summary ? `<p class="biz-summary">${escapeHtml(summary)}</p>` : "";
+  const formulaHtml = formula
+    ? `<details class="formula-details"><summary>Show formula</summary><pre>${escapeHtml(formula)}</pre></details>`
+    : "";
+  return `${summaryHtml}${extraHtml}${formulaHtml}` || "—";
 }
 
 function populateRulesFormFilter(catalog) {
@@ -559,13 +574,19 @@ function renderRulesCatalog() {
     const hay = [
       r.form,
       r.field,
+      r.label,
       r.data_type,
+      r.business_summary,
       r.default_value,
+      r.default_summary,
       r.validation,
+      r.validation_summary,
       r.failures,
       r.translation,
       r.hide_when,
+      r.hide_summary,
       r.lookupText,
+      r.lookup_summary,
     ]
       .join(" ")
       .toLowerCase();
@@ -599,23 +620,32 @@ function renderRulesCatalog() {
                 }${l.lookup_key ? ` key=<code>${escapeHtml(String(l.lookup_key))}</code>` : ""}</li>`
             )
             .join("");
+          const lookupCell = r.lookup_summary
+            ? `<p class="biz-summary">${escapeHtml(r.lookup_summary)}</p>${lookupHtml ? `<ul class="lookup-mini">${lookupHtml}</ul>` : ""}`
+            : lookupHtml
+              ? `<ul class="lookup-mini">${lookupHtml}</ul>`
+              : "—";
           return `<tr>
-            <td><code>${escapeHtml(r.field)}</code><div class="field-meta">${escapeHtml(r.data_type)}${r.kind ? ` · ${escapeHtml(r.kind)}` : ""}</div></td>
-            <td class="formula-cell">${r.default_value ? `<pre>${escapeHtml(r.default_value)}</pre>` : "—"}</td>
-            <td class="formula-cell">${
-              r.validation
-                ? `<pre>${escapeHtml(r.validation)}</pre>${r.failures ? `<p class="failure-msg">${escapeHtml(r.failures)}</p>` : ""}`
-                : "—"
-            }</td>
-            <td class="formula-cell">${r.hide_when ? `<pre>${escapeHtml(r.hide_when)}</pre>` : "—"}</td>
-            <td>${lookupHtml ? `<ul class="lookup-mini">${lookupHtml}</ul>` : "—"}</td>
+            <td>
+              <div class="field-label">${escapeHtml(r.label || r.field)}</div>
+              <code class="field-tech">${escapeHtml(r.field)}</code>
+              <div class="field-meta">${escapeHtml(r.data_type)}${r.kind ? ` · ${escapeHtml(r.kind)}` : ""}</div>
+            </td>
+            <td class="formula-cell">${renderBizCell(r.business_summary || r.default_summary, r.default_value)}</td>
+            <td class="formula-cell">${renderBizCell(
+              r.validation_summary,
+              r.validation,
+              r.failures ? `<p class="failure-msg">${escapeHtml(r.failures)}</p>` : ""
+            )}</td>
+            <td class="formula-cell">${renderBizCell(r.hide_summary, r.hide_when)}</td>
+            <td class="formula-cell">${lookupCell}</td>
           </tr>`;
         })
         .join("");
       return `<details class="rules-group" open>
         <summary><strong>${escapeHtml(formName)}</strong> <span class="muted">${formRows.length} fields</span></summary>
         <table class="rules-table">
-          <thead><tr><th>Field</th><th>Default</th><th>Validation</th><th>Hide-When</th><th>Lookups</th></tr></thead>
+          <thead><tr><th>Field</th><th>What it does</th><th>Validation</th><th>When hidden</th><th>Data dependencies</th></tr></thead>
           <tbody>${body}</tbody>
         </table>
       </details>`;
