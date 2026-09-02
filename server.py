@@ -143,14 +143,13 @@ def api_store_graph(body: StoreGraphRequest) -> dict[str, str]:
     return {"id": graph_id}
 
 
-# Local dev only — Vercel serves public/ statically (VERCEL env is set automatically).
-if not os.getenv("VERCEL"):
-    @app.get("/")
-    def index() -> FileResponse:
-        return FileResponse(WEB_DIR / "index.html")
+@app.get("/")
+def index() -> FileResponse:
+    return FileResponse(WEB_DIR / "index.html")
 
-    if WEB_DIR.exists():
-        app.mount("/static", StaticFiles(directory=WEB_DIR), name="static")
+
+if WEB_DIR.exists():
+    app.mount("/static", StaticFiles(directory=WEB_DIR), name="static")
 
 
 def main() -> None:
