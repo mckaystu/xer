@@ -63,20 +63,32 @@ def render_markdown(report: AuditReport) -> str:
             f"language `{f.language}` · line `{f.line}`  "
         )
         lines.append(f"**Category:** {f.category}  ")
-        lines.append(f"**Engine:** {f.engine}")
+        lines.append(f"**Engine:** {f.engine}  ")
+        lines.append(f"**Language:** {f.language_label or f.language}")
+        lines.append("")
+        if f.problem_breakdown:
+            lines.append("#### Problem Breakdown")
+            lines.append("")
+            lines.append(f.problem_breakdown)
+            lines.append("")
+        if f.remediation_guide:
+            lines.append("#### Remediation Guide")
+            lines.append("")
+            lines.append(f.remediation_guide)
+            lines.append("")
+        if f.handle_lifecycle_warning:
+            lines.append(f"**Handle Lifecycle Warning:** {f.handle_lifecycle_warning}")
+            lines.append("")
+        lines.append(
+            f"**Snippet Lines:** {f.line_number_start or f.line}–{f.line_number_end or f.line} · "
+            f"**Highlight:** L{f.highlight_line or f.line}"
+        )
         lines.append("")
         lines.append("#### Code Evidence (As Is)")
         lines.append("")
         lines.append("```")
         lines.append((f.code_snippet_as_is or f.evidence).rstrip())
         lines.append("```")
-        lines.append("")
-        if f.handle_lifecycle_warning:
-            lines.append(f"**Handle Lifecycle Warning:** {f.handle_lifecycle_warning}")
-            lines.append("")
-        lines.append(
-            f"**Snippet Lines:** {f.line_number_start or f.line}–{f.line_number_end or f.line}"
-        )
         lines.append("")
         lines.append("#### Technical Impact")
         lines.append("")
