@@ -91,6 +91,16 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         action="store_true",
         help="Print full JSON report to stdout instead of the console summary",
     )
+    parser.add_argument(
+        "--inventory",
+        action="store_true",
+        help="Also emit function inventory + recycle coverage rate (JSON sidecar + console)",
+    )
+    parser.add_argument(
+        "--inventory-only",
+        action="store_true",
+        help="Skip DOM-001..013 audit; only run function inventory",
+    )
     return parser.parse_args(argv)
 
 
@@ -101,13 +111,43 @@ def main(argv: list[str] | None = None) -> int:
         print("Error: provide a DXL/ODP path or --graph application_graph.json", file=sys.stderr)
         return 2
 
-    from analytics.code_auditor import console_summary, run_audit
+    from analytics.code_auditor import console_summary, run_audit, run_function_inventory
 
     graph = None
     source: Path | None = args.source
     if args.graph:
         graph = json.loads(Path(args.graph).read_text(encoding="utf-8"))
         source = args.graph
+
+    if args.inventory or args.inventory_only:
+        try:
+            inventory = run_function_inventory(
+                str(source) if source else None,
+                graph=graph,
+            )
+        except Exception as exc:  # noqa: BLE001
+            print(f"Function inventory failed: {exc}", file=sys.stderr)
+            return 1
+        inv_path = args.out_dir / "function_inventory.json"
+        args.out_dir.mkdir(parents=True, exist_ok=True)
+        inv_path.write_text(json.dumps(inventory, indent=2) + "\n", encoding="utf-8")
+        s = inventory["summary"]
+        print(
+            "Function inventory — "
+            f"{s['total_functions_scanned']} functions · "
+            f"{s['functions_allocating_handles']} allocate handles · "
+            f"{s['functions_with_cleanup']} with cleanup · "
+            f"{s['unprotected_functions']} unprotected · "
+            f"recycle coverage {s['recycle_coverage_rate']}%"
+        )
+        print(f"Wrote {inv_path}")
+        if args.inventory_only:
+            if args.json_stdout:
+                print(json.dumps(inventory, indent=2))
+            return 0
+
+    if args.inventory_only:
+        return 0
 
     use_llm: bool | None
     if args.no_llm:

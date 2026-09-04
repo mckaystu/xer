@@ -100,6 +100,7 @@ let currentViz = null;
 let currentSummary = null;
 let currentAnalysis = null;
 let currentCodeAudit = null;
+let currentFunctionInventory = null;
 let fullGraph = null;
 let activeView = "focus";
 let focusNodeId = null;
@@ -729,6 +730,77 @@ function renderRulesCatalog() {
   rulesContent.innerHTML = sections;
 }
 
+function inventoryStatusClass(status) {
+  if (status === "UNPROTECTED_ALLOCATION") return "status-unprotected";
+  if (status === "PROTECTED") return "status-protected";
+  return "status-safe";
+}
+
+function inventoryStatusLabel(status) {
+  if (status === "UNPROTECTED_ALLOCATION") return "Unprotected";
+  if (status === "PROTECTED") return "Protected";
+  return "Safe (no handles)";
+}
+
+function coverageRiskClass(rate) {
+  if (rate < 40) return "risk-high";
+  if (rate < 75) return "risk-moderate";
+  return "risk-low";
+}
+
+function renderFunctionInventoryCard(inventory) {
+  if (!inventory?.summary) {
+    return `<section class="overview-section"><h2>Function &amp; Recycle Inventory</h2><p class="placeholder">Inventory not available for this graph.</p></section>`;
+  }
+  const s = inventory.summary;
+  const rate = typeof s.recycle_coverage_rate === "number" ? s.recycle_coverage_rate : 0;
+  const riskClass = coverageRiskClass(rate);
+  const rows = (inventory.inventory || [])
+    .map(
+      (f) =>
+        `<tr class="${inventoryStatusClass(f.status)}">
+          <td><code>${escapeHtml(f.id)}</code></td>
+          <td><code>${escapeHtml(f.function_name)}</code></td>
+          <td>${escapeHtml(f.design_element)}</td>
+          <td>${escapeHtml(f.language)}</td>
+          <td>${f.allocates_handles ? "Yes" : "No"}</td>
+          <td>${f.recycle_call_count}</td>
+          <td><span class="status-pill ${inventoryStatusClass(f.status)}">${escapeHtml(inventoryStatusLabel(f.status))}</span></td>
+          <td>${f.loc}</td>
+        </tr>`
+    )
+    .join("");
+
+  return `
+    <section class="overview-section score-section" id="functionInventorySection">
+      <h2>Function &amp; Recycle Inventory</h2>
+      <div class="score-card ${riskClass}">
+        <div class="score-main">
+          <div class="score-ring" aria-label="Recycle coverage rate">
+            <span class="score-value">${rate}</span>
+            <span class="score-max">%</span>
+          </div>
+          <div class="score-copy">
+            <p class="score-rating">Recycle Coverage Rate</p>
+            <p class="score-hint">Share of handle-allocating functions that call <code>.recycle()</code> / <code>Delete</code>.</p>
+            <div class="score-metrics inventory-metrics">
+              <div class="metric"><span class="metric-label">Functions scanned</span><strong>${s.total_functions_scanned || 0}</strong></div>
+              <div class="metric"><span class="metric-label">Allocate handles</span><strong>${s.functions_allocating_handles || 0}</strong></div>
+              <div class="metric"><span class="metric-label">With cleanup</span><strong>${s.functions_with_cleanup || 0}</strong></div>
+              <div class="metric"><span class="metric-label">Unprotected</span><strong>${s.unprotected_functions || 0}</strong></div>
+            </div>
+          </div>
+        </div>
+        ${
+          rows
+            ? `<table class="overview-table inventory-table"><thead><tr><th>ID</th><th>Function</th><th>Design element</th><th>Lang</th><th>Allocates</th><th>Recycles</th><th>Status</th><th>LOC</th></tr></thead><tbody>${rows}</tbody></table>`
+            : `<p class="placeholder">No functions extracted from stored script blocks.</p>`
+        }
+      </div>
+    </section>
+  `;
+}
+
 function renderCodeAuditCard(audit) {
   if (!audit) {
     return `<section class="overview-section"><h2>Code Quality Review</h2><p class="placeholder">Audit not available for this graph.</p></section>`;
@@ -775,23 +847,33 @@ function renderCodeAuditCard(audit) {
   `;
 }
 
-function renderCodeAuditTeaser(audit) {
-  if (!audit) {
+function renderCodeAuditTeaser(audit, inventory) {
+  if (!audit && !inventory?.summary) {
     return `<section class="overview-section"><h2>Code Quality</h2><p class="placeholder">No code audit yet.</p></section>`;
   }
-  const counts = audit.severity_counts || {};
-  const risk = audit.handle_exhaustion_risk || "LOW";
+  const counts = audit?.severity_counts || {};
+  const risk = audit?.handle_exhaustion_risk || "LOW";
+  const rate = inventory?.summary?.recycle_coverage_rate;
   const riskClass =
-    risk === "CRITICAL" || risk === "HIGH" ? "risk-high" : risk === "MEDIUM" ? "risk-moderate" : "risk-low";
-  const n = audit.findings?.length || 0;
+    risk === "CRITICAL" || risk === "HIGH" || (typeof rate === "number" && rate < 40)
+      ? "risk-high"
+      : risk === "MEDIUM" || (typeof rate === "number" && rate < 75)
+        ? "risk-moderate"
+        : "risk-low";
+  const n = audit?.findings?.length || 0;
+  const unprot = inventory?.summary?.unprotected_functions;
   return `
     <section class="overview-section score-section">
       <h2>Code Quality (summary)</h2>
       <div class="score-card ${riskClass}">
         <div class="score-copy">
           <p class="score-rating">Handle Exhaustion Risk: ${escapeHtml(risk)}</p>
-          <p class="score-hint">${n} findings · C:${counts.CRITICAL || 0} H:${counts.HIGH || 0} M:${counts.MEDIUM || 0} L:${counts.LOW || 0}</p>
-          <p class="overview-sub"><a href="#" id="openCodeTab">Open Code Analysis for deep-dive review →</a></p>
+          <p class="score-hint">${n} findings · C:${counts.CRITICAL || 0} H:${counts.HIGH || 0} M:${counts.MEDIUM || 0} L:${counts.LOW || 0}${
+            typeof rate === "number"
+              ? ` · recycle coverage ${rate}% (${unprot || 0} unprotected)`
+              : ""
+          }</p>
+          <p class="overview-sub"><a href="#" id="openCodeTab">Open Code Analysis for inventory &amp; deep-dive →</a></p>
         </div>
       </div>
     </section>
@@ -800,16 +882,17 @@ function renderCodeAuditTeaser(audit) {
 
 function renderCodeAnalysis() {
   if (!codeAnalysisContent) return;
-  if (!currentCodeAudit) {
-    codeAnalysisContent.innerHTML = `<div class="overview-header"><h2>Code Analysis</h2><p class="overview-sub">Static review of Domino handle leaks, recycle anti-patterns, and remediation templates.</p></div><p class="placeholder">Loading code quality audit…</p>`;
+  if (!currentCodeAudit && !currentFunctionInventory) {
+    codeAnalysisContent.innerHTML = `<div class="overview-header"><h2>Code Analysis</h2><p class="overview-sub">Static review of Domino handle leaks, recycle coverage, and remediation templates.</p></div><p class="placeholder">Loading code quality audit…</p>`;
     if (graphSelect.value) loadSummary(graphSelect.value);
     return;
   }
   codeAnalysisContent.innerHTML = `
     <div class="overview-header">
       <h2>Code Analysis</h2>
-      <p class="overview-sub">C-API handle lifecycle, ODA conflicts, and memory anti-patterns — click a finding for As-Is / To-Be remediation.</p>
+      <p class="overview-sub">Function inventory with recycle coverage, plus C-API handle findings — click a finding for As-Is / To-Be remediation.</p>
     </div>
+    ${renderFunctionInventoryCard(currentFunctionInventory)}
     ${renderCodeAuditCard(currentCodeAudit)}
   `;
   wireCodeAuditDeepDive();
@@ -928,7 +1011,7 @@ function renderOverview(summary) {
   const lifecycles = summary.document_lifecycles || [];
   const dbs = summary.databases || [];
   const scoreCard = renderModernizationCard(currentAnalysis?.modernization_score);
-  const codeTeaser = renderCodeAuditTeaser(currentCodeAudit);
+  const codeTeaser = renderCodeAuditTeaser(currentCodeAudit, currentFunctionInventory);
 
   const dbHtml = dbs.length
     ? `<section class="overview-section"><h2>Databases (${dbs.length})</h2><ul class="overview-list">${dbs
@@ -1034,14 +1117,16 @@ function renderOverview(summary) {
 async function loadSummary(graphId) {
   try {
     overviewContent.innerHTML = `<p class="placeholder">Loading application analysis…</p>`;
-    const [summary, analysis, codeAudit] = await Promise.all([
+    const [summary, analysis, codeAudit, functionInventory] = await Promise.all([
       fetchJson(`/api/graphs/${graphId}/summary`),
       fetchJson(`/api/graphs/${graphId}/analysis`).catch(() => null),
       fetchJson(`/api/graphs/${graphId}/code-audit`).catch(() => null),
+      fetchJson(`/api/graphs/${graphId}/function-inventory`).catch(() => null),
     ]);
     currentSummary = summary;
     currentAnalysis = analysis;
     currentCodeAudit = codeAudit;
+    currentFunctionInventory = functionInventory;
     if (activeView === "overview") renderOverview(currentSummary);
     if (activeView === "code") renderCodeAnalysis();
     if (activeView === "rules") renderRulesCatalog();
@@ -1049,6 +1134,7 @@ async function loadSummary(graphId) {
     currentSummary = null;
     currentAnalysis = null;
     currentCodeAudit = null;
+    currentFunctionInventory = null;
     if (activeView === "overview") {
       overviewContent.innerHTML = `<p class="error">Could not load analysis: ${err.message}. Restart the API server to pick up the latest code.</p>`;
     }
@@ -1383,6 +1469,7 @@ async function loadSelectedGraph() {
   currentSummary = null;
   currentAnalysis = null;
   currentCodeAudit = null;
+  currentFunctionInventory = null;
   syncEdgeFilterForGraph();
   populateFocusSelect();
   loadSummary(id).catch(() => {});

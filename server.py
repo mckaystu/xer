@@ -157,6 +157,28 @@ def api_graph_code_audit(
     return report.to_dict()
 
 
+@app.get("/api/graphs/{graph_id}/function-inventory")
+def api_graph_function_inventory(graph_id: str) -> dict[str, Any]:
+    """Function inventory + recycle coverage rate for code stored in the graph."""
+    from analytics.code_auditor import run_function_inventory
+    from neon_db import get_graph
+
+    try:
+        row = get_graph(graph_id)
+    except (ValueError, ConnectionError) as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    if not row:
+        raise HTTPException(status_code=404, detail="Graph not found")
+
+    try:
+        return run_function_inventory(
+            row.get("nsf_path") or graph_id,
+            graph=row["graph"],
+        )
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(status_code=422, detail=f"Function inventory failed: {exc}") from exc
+
+
 @app.post("/api/synthesize")
 def api_synthesize_local(body: StoreGraphRequest, rules_limit: int = Query(50, ge=1, le=200)) -> dict[str, Any]:
     from graph_synthesis import synthesize
