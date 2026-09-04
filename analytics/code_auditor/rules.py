@@ -12,7 +12,7 @@ from analytics.code_auditor.snippets import (
 )
 
 RE_CHAINED_CREATE = re.compile(
-    r"""(?P<ev>(?:session|Session|notesSession|NotesSession|uiDoc|uidoc)\s*\.\s*
+    r"""(?P<ev>\b\w+\s*\.\s*
         (?:createDateTime|createName|createDateRange|getDatabase)\s*\([^;]*?\)\s*\.\s*\w+)""",
     re.I | re.X | re.S,
 )
@@ -208,15 +208,10 @@ def detect_dom002(unit: CodeUnit) -> list[Finding]:
         return []
     if not RE_LOOP.search(unit.body) or not RE_GET_NEXT.search(unit.body):
         return []
-    # Loop with getNext* but no recycle nearby → high risk
+    # Quality pattern: recycle present → incomplete recycle is DOM-012; unsafe
+    # same-var reassignment is DOM-013. Do not flag DOM-002 on try/finally loops.
     if RE_RECYCLE.search(unit.body):
-        # Still flag if recycle appears only outside obvious loop body heuristic
-        # Medium confidence when recycle exists somewhere
-        confidence = 72
-        severity = "HIGH"
-    else:
-        confidence = 92
-        severity = "CRITICAL"
+        return []
     match = RE_GET_NEXT.search(unit.body)
     assert match is not None
     return [
@@ -225,8 +220,8 @@ def detect_dom002(unit: CodeUnit) -> list[Finding]:
             unit,
             line=_line_of(unit.body, match.start(), unit.start_line),
             evidence=_snippet(unit.body, match.start(), 260),
-            confidence=confidence,
-            severity=severity,
+            confidence=92,
+            severity="CRITICAL",
             impact=(
                 "Document/entry iteration without recycling the previous handle leaks one native object "
                 "per loop iteration. Large collections amplify handle exhaustion and JVM/native memory growth."
