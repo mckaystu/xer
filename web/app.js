@@ -756,6 +756,11 @@ function renderFunctionInventoryCard(inventory) {
   const s = inventory.summary;
   const rate = typeof s.recycle_coverage_rate === "number" ? s.recycle_coverage_rate : 0;
   const riskClass = coverageRiskClass(rate);
+  const scanned = s.total_functions_scanned || 0;
+  const allocating = s.functions_allocating_handles || 0;
+  const withCleanup = s.functions_with_cleanup || 0;
+  const unprotected = s.unprotected_functions || 0;
+  const safeNoHandles = Math.max(0, scanned - allocating);
   const rows = (inventory.inventory || [])
     .map(
       (f, idx) =>
@@ -772,6 +777,23 @@ function renderFunctionInventoryCard(inventory) {
     )
     .join("");
 
+  const rateExplainer =
+    allocating === 0
+      ? `<p class="coverage-explainer">No Domino handle allocations were detected, so coverage defaults to 100% (nothing to recycle).</p>`
+      : `<p class="coverage-explainer">
+          <strong>${rate}%</strong> =
+          <strong>${withCleanup}</strong> with cleanup
+          ÷ <strong>${allocating}</strong> that allocate handles
+          × 100.
+          The other <strong>${safeNoHandles}</strong> of ${scanned} scanned functions are
+          <em>Safe (no handles)</em> and are <strong>not</strong> in this percentage.
+          ${
+            rate === 0
+              ? ` Right now every handle-allocating function is missing <code>Delete</code> / <code>.recycle()</code> — open an <strong>Unprotected</strong> row below to see the code.`
+              : ""
+          }
+        </p>`;
+
   return `
     <section class="overview-section score-section" id="functionInventorySection">
       <h2>Function &amp; Recycle Inventory</h2>
@@ -783,15 +805,21 @@ function renderFunctionInventoryCard(inventory) {
           </div>
           <div class="score-copy">
             <p class="score-rating">Recycle Coverage Rate</p>
-            <p class="score-hint">Share of handle-allocating functions that call <code>.recycle()</code> / <code>Delete</code>. Click a row for As-Is / To-Be deep-dive.</p>
+            <p class="score-hint">
+              Of functions that open Domino objects (<code>NotesDocument</code>, views, etc.),
+              what share also call <code>Delete</code> (LotusScript) or <code>.recycle()</code> (Java/SSJS)?
+            </p>
             <div class="score-metrics inventory-metrics">
-              <div class="metric"><span class="metric-label">Functions scanned</span><strong>${s.total_functions_scanned || 0}</strong></div>
-              <div class="metric"><span class="metric-label">Allocate handles</span><strong>${s.functions_allocating_handles || 0}</strong></div>
-              <div class="metric"><span class="metric-label">With cleanup</span><strong>${s.functions_with_cleanup || 0}</strong></div>
-              <div class="metric"><span class="metric-label">Unprotected</span><strong>${s.unprotected_functions || 0}</strong></div>
+              <div class="metric"><span class="metric-label">Functions scanned</span><strong>${scanned}</strong></div>
+              <div class="metric"><span class="metric-label">Safe (no handles)</span><strong>${safeNoHandles}</strong></div>
+              <div class="metric"><span class="metric-label">Allocate handles</span><strong>${allocating}</strong></div>
+              <div class="metric"><span class="metric-label">With cleanup</span><strong>${withCleanup}</strong></div>
+              <div class="metric"><span class="metric-label">Unprotected</span><strong>${unprotected}</strong></div>
             </div>
           </div>
         </div>
+        ${rateExplainer}
+        <p class="score-hint coverage-hint">Click a table row for As-Is / To-Be deep-dive with the allocation line highlighted.</p>
         ${
           rows
             ? `<table class="overview-table inventory-table"><thead><tr><th>ID</th><th>Function</th><th>Design element</th><th>Lang</th><th>Allocates</th><th>Recycles</th><th>Status</th><th>LOC</th></tr></thead><tbody>${rows}</tbody></table>`
