@@ -7,7 +7,7 @@ declared subroutine/method, and classifies recycle coverage for Domino handles.
 from __future__ import annotations
 
 import re
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any, Iterable, Literal
 
@@ -17,7 +17,11 @@ from analytics.code_auditor.extractor import (
     extract_units_from_path,
 )
 from analytics.code_auditor.models import CodeUnit
-
+from analytics.code_auditor.snippets import (
+    extract_line_window,
+    language_label,
+    remediation_template,
+)
 FunctionStatus = Literal["SAFE_NO_HANDLES", "PROTECTED", "UNPROTECTED_ALLOCATION"]
 
 # Domino handle allocation heuristics (Java / SSJS — word matches)
@@ -103,9 +107,25 @@ class FunctionRecord:
     loc: int
     source_file: str = ""
     start_line: int = 0
+    # Deep-dive fields (same shape as Handle & Memory Findings)
+    code_snippet_as_is: str = ""
+    code_snippet_to_be: str = ""
+    code_snippet_lines: list = field(default_factory=list)
+    line_number_start: int = 0
+    line_number_end: int = 0
+    highlight_line: int = 0
+    problem_breakdown: str = ""
+    remediation_guide: str = ""
+    handle_lifecycle_warning: str = ""
+    language_label: str = ""
 
     def to_dict(self) -> dict[str, Any]:
-        return asdict(self)
+        data = asdict(self)
+        data["finding_id"] = self.id
+        data["issue"] = f"{self.function_name} — {self.status.replace('_', ' ').title()}"
+        data["location"] = f"{self.design_element} L{self.start_line}"
+        data["line_number"] = self.highlight_line or self.start_line
+        return data
 
 
 def _language_label(lang: str) -> str:
@@ -207,10 +227,10 @@ def _match_brace_block(text: str, open_brace_index: int) -> str | None:
     return None
 
 
-def _extract_lotusscript(unit: CodeUnit) -> list[tuple[str, str, int]]:
-    """Return list of (name, body, start_line) for LotusScript Subs/Functions."""
+def _extract_lotusscript(unit: CodeUnit) -> list[tuple[str, str, int, str]]:
+    """Return list of (name, analysis_body, start_line, display_body)."""
     body = unit.body
-    results: list[tuple[str, str, int]] = []
+    results: list[tuple[str, str, int, str]] = []
 
     for m in _LS_DECL.finditer(body):
         line_start = body.rfind("\n", 0, m.start()) + 1
@@ -220,28 +240,29 @@ def _extract_lotusscript(unit: CodeUnit) -> list[tuple[str, str, int]]:
             continue
         name = m.group(2)
         fn_body = m.group(3) or ""
+        display = m.group(0)
         start_line = unit.start_line + body.count("\n", 0, m.start())
-        results.append((name, fn_body, start_line))
+        results.append((name, fn_body, start_line, display))
 
-    # Header without End Sub (truncated DXL slice)
     if not results and re.search(r"(?im)^\s*(?:Public |Private )?(?:Sub|Function)\s+", body):
         first = re.search(
             r"(?im)^\s*(?:Public |Private |Friend )?(?:Sub|Function)\s+([A-Za-z_][\w.]*)",
             body,
         )
         if first and not _LS_DECLARE.search(body[max(0, first.start() - 20) : first.end()]):
-            results.append((first.group(1), body[first.end() :], unit.start_line))
+            name = first.group(1)
+            rest = body[first.end() :]
+            results.append((name, rest, unit.start_line, body))
     elif not results and unit.event:
-        # Event-scoped block (Initialize, QueryOpen, …) without nested Subs
-        results.append((unit.event, body, unit.start_line))
+        results.append((unit.event, body, unit.start_line, body))
 
     return results
 
 
-def _extract_brace_functions(unit: CodeUnit) -> list[tuple[str, str, int]]:
-    """Extract JS `function` and Java-style method declarations with brace bodies."""
+def _extract_brace_functions(unit: CodeUnit) -> list[tuple[str, str, int, str]]:
+    """Extract JS/Java methods as (name, analysis_body, start_line, display_body)."""
     body = unit.body
-    results: list[tuple[str, str, int]] = []
+    results: list[tuple[str, str, int, str]] = []
     occupied: list[tuple[int, int]] = []
 
     def overlaps(start: int, end: int) -> bool:
@@ -257,7 +278,7 @@ def _extract_brace_functions(unit: CodeUnit) -> list[tuple[str, str, int]]:
             continue
         occupied.append((m.start(), end))
         start_line = unit.start_line + body.count("\n", 0, m.start())
-        results.append((m.group("name"), inner, start_line))
+        results.append((m.group("name"), inner, start_line, body[m.start() : end]))
 
     lang = (unit.language or "").lower()
     if "java" in lang or "xpage" in lang or lang in {"source", "script"}:
@@ -268,8 +289,6 @@ def _extract_brace_functions(unit: CodeUnit) -> list[tuple[str, str, int]]:
                 continue
             if ret.lower() in _JAVA_SKIP_RET:
                 continue
-            # Avoid matching constructors named like class with void-ish false positives:
-            # require at least one modifier keyword
             mods = (m.group("mods") or "").lower()
             if not any(k in mods for k in ("public", "private", "protected", "static")):
                 continue
@@ -282,48 +301,162 @@ def _extract_brace_functions(unit: CodeUnit) -> list[tuple[str, str, int]]:
                 continue
             occupied.append((m.start(), end))
             start_line = unit.start_line + body.count("\n", 0, m.start())
-            results.append((name, inner, start_line))
+            results.append((name, inner, start_line, body[m.start() : end]))
 
-    # SSJS event / scriptlet with no function wrappers — treat whole unit
     if not results and unit.event:
-        results.append((unit.event, body, unit.start_line))
+        results.append((unit.event, body, unit.start_line, body))
 
     return results
 
 
-def extract_functions_from_unit(unit: CodeUnit) -> list[tuple[str, str, int]]:
+def extract_functions_from_unit(unit: CodeUnit) -> list[tuple[str, str, int, str]]:
     lang = (unit.language or "").lower()
     if "lotus" in lang:
         return _extract_lotusscript(unit)
     if lang in {"javascript", "jscript", "ssjs", "js", "java", "xpages", "xsp", "source", "script"}:
         return _extract_brace_functions(unit)
-    # Unknown but has Sub/Function markers
     if re.search(r"(?im)^\s*(?:Sub|Function)\s+", unit.body):
         return _extract_lotusscript(unit)
     return _extract_brace_functions(unit)
+
+
+def _focus_offset(analysis_body: str, status: FunctionStatus, language: str) -> int:
+    """Byte offset inside analysis_body to highlight."""
+    if status == "PROTECTED":
+        patterns = [
+            re.compile(r"\bDelete\s+\w+", re.I),
+            re.compile(r"\b(?:Call\s+)?\w+\.Recycle\s*\(", re.I),
+            re.compile(r"\.recycle\s*\(", re.I),
+        ]
+        for p in patterns:
+            m = p.search(analysis_body)
+            if m:
+                return m.start()
+    if status in {"UNPROTECTED_ALLOCATION", "PROTECTED", "SAFE_NO_HANDLES"}:
+        patterns = LS_ALLOCATION_PATTERNS if _is_lotusscript_lang(language) else ALLOCATION_PATTERNS
+        for p in patterns:
+            m = p.search(analysis_body)
+            if m:
+                return m.start()
+    return 0
+
+
+def _inventory_guides(status: FunctionStatus, language: str, function_name: str) -> tuple[str, str, str, str]:
+    """problem, guide, warning, to_be_template."""
+    lang = language
+    is_ls = _is_lotusscript_lang(lang) or language == "LotusScript"
+    if status == "UNPROTECTED_ALLOCATION":
+        problem = (
+            f"`{function_name}` allocates Domino handles but never releases them with "
+            f"{'`Delete`' if is_ls else '`.recycle()`'} before exit. Native C-API memory stays "
+            "pinned until the agent/HTTP thread dies."
+        )
+        guide = (
+            "Capture the next handle first, finish work, then "
+            + ("`Delete` the current Notes* object before advancing." if is_ls else "`.recycle()` in a `finally` before advancing.")
+        )
+        warning = (
+            "Unprotected allocation — each call path that opens Documents/Views without cleanup "
+            "contributes to handle-table exhaustion."
+        )
+        to_be = remediation_template("LS-DOM-001" if is_ls else "DOM-002", "lotusscript" if is_ls else "java")
+    elif status == "PROTECTED":
+        problem = (
+            f"`{function_name}` allocates Domino handles and contains explicit cleanup "
+            f"({'`Delete` / `.Recycle()`' if is_ls else '`.recycle()`'})."
+        )
+        guide = "Keep cleanup on every exit path (including error handlers / early returns)."
+        warning = "Protected — verify cleanup still runs on exception / early-exit branches."
+        to_be = (
+            "' Already protected pattern — retain Delete / Recycle on all paths\n"
+            if is_ls
+            else "// Already protected — keep recycle() in finally on all paths\n"
+        ) + remediation_template("LS-DOM-001" if is_ls else "DOM-002", "lotusscript" if is_ls else "java")
+    else:
+        problem = (
+            f"`{function_name}` does not appear to allocate Domino native handles "
+            "(no Notes*/GetDocument*/createDateTime signals in the body)."
+        )
+        guide = "No recycle action required for this routine based on static heuristics."
+        warning = "Safe (no handles) — re-check if this helper is called with live handles passed in."
+        to_be = "' No Domino handle allocation detected — no recycle changes required." if is_ls else "// No Domino handle allocation detected."
+    return problem, guide, warning, to_be
+
+
+def _attach_inventory_snippets(
+    *,
+    display_body: str,
+    analysis_body: str,
+    start_line: int,
+    status: FunctionStatus,
+    language: str,
+    function_name: str,
+) -> dict[str, Any]:
+    # Map analysis offset → absolute line in display_body
+    # Prefer highlighting inside display text by searching the same token
+    offset = _focus_offset(analysis_body, status, language)
+    # Find corresponding position in display_body
+    needle = analysis_body[offset : offset + 48] if analysis_body else ""
+    disp_idx = display_body.find(needle) if needle.strip() else 0
+    if disp_idx < 0:
+        disp_idx = 0
+    highlight_line = start_line + display_body.count("\n", 0, disp_idx)
+
+    # Prefer a generous window so the full function is readable; fall back to ±25
+    line_count = max(1, display_body.count("\n") + 1)
+    radius = 40 if line_count <= 90 else 25
+    snippet, line_start, line_end, _hl, structured = extract_line_window(
+        display_body,
+        focus_line=highlight_line,
+        base_line=start_line,
+        radius=radius,
+    )
+    problem, guide, warning, to_be = _inventory_guides(status, language, function_name)
+    return {
+        "code_snippet_as_is": snippet,
+        "code_snippet_to_be": to_be,
+        "code_snippet_lines": structured,
+        "line_number_start": line_start,
+        "line_number_end": line_end,
+        "highlight_line": highlight_line,
+        "problem_breakdown": problem,
+        "remediation_guide": guide,
+        "handle_lifecycle_warning": warning,
+        "language_label": language if language in {"LotusScript", "Java", "SSJS / JavaScript", "XPages"} else language_label(language),
+    }
 
 
 def build_inventory(units: Iterable[CodeUnit]) -> list[FunctionRecord]:
     records: list[FunctionRecord] = []
     seq = 0
     for unit in units:
-        for name, fn_body, start_line in extract_functions_from_unit(unit):
+        for name, fn_body, start_line, display_body in extract_functions_from_unit(unit):
             seq += 1
             allocates = _count_allocates(fn_body, unit.language)
             recycle_count = _count_cleanup(fn_body, unit.language)
             status = _classify(allocates, recycle_count)
+            lang_label = _language_label(unit.language)
+            snippets = _attach_inventory_snippets(
+                display_body=display_body or fn_body,
+                analysis_body=fn_body,
+                start_line=start_line,
+                status=status,
+                language=unit.language,
+                function_name=name,
+            )
             records.append(
                 FunctionRecord(
                     id=f"FUNC-{seq:03d}",
                     design_element=_design_element(unit),
                     function_name=name,
-                    language=_language_label(unit.language),
+                    language=lang_label,
                     allocates_handles=allocates,
                     recycle_call_count=recycle_count,
                     status=status,
                     loc=_loc(fn_body),
                     source_file=unit.source_file,
                     start_line=start_line,
+                    **snippets,
                 )
             )
     return records

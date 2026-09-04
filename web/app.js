@@ -758,8 +758,8 @@ function renderFunctionInventoryCard(inventory) {
   const riskClass = coverageRiskClass(rate);
   const rows = (inventory.inventory || [])
     .map(
-      (f) =>
-        `<tr class="${inventoryStatusClass(f.status)}">
+      (f, idx) =>
+        `<tr class="inventory-row ${inventoryStatusClass(f.status)}" data-inventory-idx="${idx}" role="button" tabindex="0">
           <td><code>${escapeHtml(f.id)}</code></td>
           <td><code>${escapeHtml(f.function_name)}</code></td>
           <td>${escapeHtml(f.design_element)}</td>
@@ -783,7 +783,7 @@ function renderFunctionInventoryCard(inventory) {
           </div>
           <div class="score-copy">
             <p class="score-rating">Recycle Coverage Rate</p>
-            <p class="score-hint">Share of handle-allocating functions that call <code>.recycle()</code> / <code>Delete</code>.</p>
+            <p class="score-hint">Share of handle-allocating functions that call <code>.recycle()</code> / <code>Delete</code>. Click a row for As-Is / To-Be deep-dive.</p>
             <div class="score-metrics inventory-metrics">
               <div class="metric"><span class="metric-label">Functions scanned</span><strong>${s.total_functions_scanned || 0}</strong></div>
               <div class="metric"><span class="metric-label">Allocate handles</span><strong>${s.functions_allocating_handles || 0}</strong></div>
@@ -797,9 +797,97 @@ function renderFunctionInventoryCard(inventory) {
             ? `<table class="overview-table inventory-table"><thead><tr><th>ID</th><th>Function</th><th>Design element</th><th>Lang</th><th>Allocates</th><th>Recycles</th><th>Status</th><th>LOC</th></tr></thead><tbody>${rows}</tbody></table>`
             : `<p class="placeholder">No functions extracted from stored script blocks.</p>`
         }
+        <div id="inventoryDeepDive" class="audit-deep-dive hidden"></div>
       </div>
     </section>
   `;
+}
+
+function renderInventoryDeepDive(fn) {
+  if (!fn) return "";
+  const status = fn.status || "";
+  const statusLabel = inventoryStatusLabel(status);
+  const lang = fn.language_label || fn.language || "";
+  const hitLine = fn.highlight_line || fn.start_line || 1;
+  const lineRange =
+    fn.line_number_start && fn.line_number_end
+      ? `L${fn.line_number_start}–${fn.line_number_end}`
+      : `L${fn.start_line || hitLine}`;
+  const problem = fn.problem_breakdown || "";
+  const guide = fn.remediation_guide || "";
+  const warning = fn.handle_lifecycle_warning || "";
+  const toBe = fn.code_snippet_to_be || "";
+  const severity =
+    status === "UNPROTECTED_ALLOCATION" ? "CRITICAL" : status === "PROTECTED" ? "LOW" : "MEDIUM";
+
+  return `
+    <div class="deep-dive-header">
+      <div>
+        <h3>${escapeHtml(fn.id)} · ${escapeHtml(fn.function_name)} — ${escapeHtml(statusLabel)}</h3>
+        <p class="score-hint">
+          <span class="status-pill ${inventoryStatusClass(status)}">${escapeHtml(statusLabel)}</span>
+          · <span class="sev-pill sev-${severity}">${severity}</span>
+          · ${escapeHtml(lang)} · ${escapeHtml(fn.design_element || "")} · ${escapeHtml(lineRange)}
+          · hit <strong>L${escapeHtml(String(hitLine))}</strong>
+          · recycles: ${fn.recycle_call_count ?? 0} · LOC ${fn.loc ?? "—"}
+        </p>
+      </div>
+      <button type="button" class="deep-dive-close" id="inventoryDeepDiveClose">Close</button>
+    </div>
+
+    <div class="deep-dive-guides">
+      <div class="guide-card problem">
+        <h4>Problem Breakdown</h4>
+        <p>${escapeHtml(problem)}</p>
+      </div>
+      <div class="guide-card fix">
+        <h4>Remediation Guide</h4>
+        <p>${escapeHtml(guide)}</p>
+      </div>
+    </div>
+
+    ${warning ? `<p class="lifecycle-warning">${escapeHtml(warning)}</p>` : ""}
+
+    <div class="diff-grid">
+      <div class="diff-pane">
+        <div class="diff-label as-is">As-Is · highlight = L${escapeHtml(String(hitLine))}</div>
+        ${renderAsIsSnippet(fn)}
+      </div>
+      <div class="diff-pane">
+        <div class="diff-label to-be">To-Be (${escapeHtml(lang || "safe cleanup")})</div>
+        <pre class="diff-code">${escapeHtml(toBe)}</pre>
+      </div>
+    </div>
+  `;
+}
+
+function wireInventoryDeepDive() {
+  const section = document.getElementById("functionInventorySection");
+  const dive = document.getElementById("inventoryDeepDive");
+  if (!section || !dive || !currentFunctionInventory?.inventory?.length) return;
+
+  const openFn = (idx) => {
+    const fn = currentFunctionInventory.inventory[idx];
+    if (!fn) return;
+    dive.innerHTML = renderInventoryDeepDive(fn);
+    dive.classList.remove("hidden");
+    document.getElementById("inventoryDeepDiveClose")?.addEventListener("click", () => {
+      dive.classList.add("hidden");
+      dive.innerHTML = "";
+    });
+    dive.scrollIntoView({ behavior: "smooth", block: "nearest" });
+  };
+
+  section.querySelectorAll(".inventory-row").forEach((row) => {
+    const handler = () => openFn(Number(row.dataset.inventoryIdx));
+    row.addEventListener("click", handler);
+    row.addEventListener("keydown", (e) => {
+      if (e.key === "Enter" || e.key === " ") {
+        e.preventDefault();
+        handler();
+      }
+    });
+  });
 }
 
 function findingFilterBucket(f) {
@@ -992,6 +1080,7 @@ function renderCodeAnalysis() {
     ${renderFunctionInventoryCard(currentFunctionInventory)}
     ${renderCodeAuditCard(currentCodeAudit)}
   `;
+  wireInventoryDeepDive();
   wireCodeAuditDeepDive();
   wireAuditFindingFilters();
   wireAiValidationButton();
