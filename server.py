@@ -132,9 +132,17 @@ def api_graph_analysis(graph_id: str, refresh: bool = Query(False)) -> dict[str,
 @app.get("/api/graphs/{graph_id}/code-audit")
 def api_graph_code_audit(
     graph_id: str,
-    llm: bool = Query(False, description="Enable OpenAI enrichment when OPENAI_API_KEY is configured"),
+    llm: bool = Query(
+        False,
+        description="Run AI discrepancy audit (false-positive filter + blind-spot detector) when OPENAI_API_KEY is set",
+    ),
 ) -> dict[str, Any]:
-    """Static Domino handle/memory anti-pattern audit for code stored in the graph."""
+    """Static Domino handle/memory anti-pattern audit for code stored in the graph.
+
+    When ``llm=true``, also returns AI verification metadata on each finding:
+    ``ai_validation_status``, ``ai_validation_reasoning``, ``is_blind_spot``,
+    ``is_false_positive``, plus report-level ``ai_discrepancy_summary``.
+    """
     from analytics.code_auditor import run_audit
     from neon_db import get_graph
 

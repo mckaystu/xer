@@ -23,7 +23,7 @@ Examples
   # Directory of DXL / ODP sources with report output
   python3 domino_dxl_auditor.py ./dxl_input --out-dir analysis
 
-  # Enable LLM enrichment (requires OPENAI_API_KEY)
+  # Enable AI discrepancy audit (false-positive filter + blind-spot detector)
   python3 domino_dxl_auditor.py ./dxl_input --llm --out-dir analysis
 
   # Audit code already stored in a Xer application_graph.json
@@ -68,7 +68,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument(
         "--llm",
         action="store_true",
-        help="Enable OpenAI enrichment (requires OPENAI_API_KEY)",
+        help="Enable AI discrepancy audit: false-positive filter + blind-spot detector (requires OPENAI_API_KEY)",
     )
     parser.add_argument(
         "--no-llm",

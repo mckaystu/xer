@@ -101,6 +101,7 @@ let currentSummary = null;
 let currentAnalysis = null;
 let currentCodeAudit = null;
 let currentFunctionInventory = null;
+let auditFindingFilter = "all"; // all | verified | false_positive | blind_spot
 let fullGraph = null;
 let activeView = "focus";
 let focusNodeId = null;
@@ -801,6 +802,57 @@ function renderFunctionInventoryCard(inventory) {
   `;
 }
 
+function findingFilterBucket(f) {
+  if (f.is_blind_spot || f.ai_validation_status === "BLIND_SPOT" || f.rule_id === "DOM-BS-001") {
+    return "blind_spot";
+  }
+  if (f.is_false_positive || f.ai_validation_status === "FALSE_POSITIVE") {
+    return "false_positive";
+  }
+  if (f.ai_validation_status === "VERIFIED") {
+    return "verified";
+  }
+  return "all";
+}
+
+function filterAuditFindings(findings, filter) {
+  const list = findings || [];
+  if (filter === "all") return list.map((f, idx) => ({ f, idx }));
+  return list
+    .map((f, idx) => ({ f, idx }))
+    .filter(({ f }) => {
+      const bucket = findingFilterBucket(f);
+      if (filter === "verified") return bucket === "verified";
+      if (filter === "false_positive") return bucket === "false_positive";
+      if (filter === "blind_spot") return bucket === "blind_spot";
+      return true;
+    });
+}
+
+function aiValidationBanner(finding) {
+  const status = finding.ai_validation_status || "";
+  const reasoning = finding.ai_validation_reasoning || "";
+  if (!status && !reasoning) return "";
+  let title = "AI Validation Note";
+  let cls = "ai-note";
+  if (status === "FALSE_POSITIVE" || finding.is_false_positive) {
+    title = "AI Validation Note — Flagged False Positive";
+    cls += " ai-note-fp";
+  } else if (status === "BLIND_SPOT" || finding.is_blind_spot) {
+    title = "AI Validation Note — Blind Spot Discovered";
+    cls += " ai-note-blind";
+  } else if (status === "VERIFIED") {
+    title = "AI Validation Note — Verified Leak";
+    cls += " ai-note-verified";
+  }
+  return `
+    <div class="${cls}" role="status">
+      <strong>${escapeHtml(title)}</strong>
+      <p>${escapeHtml(reasoning || "AI discrepancy audit reviewed this finding.")}</p>
+    </div>
+  `;
+}
+
 function renderCodeAuditCard(audit) {
   if (!audit) {
     return `<section class="overview-section"><h2>Code Quality Review</h2><p class="placeholder">Audit not available for this graph.</p></section>`;
@@ -810,19 +862,44 @@ function renderCodeAuditCard(audit) {
   const riskClass =
     risk === "CRITICAL" || risk === "HIGH" ? "risk-high" : risk === "MEDIUM" ? "risk-moderate" : "risk-low";
   const findings = audit.findings || [];
-  const rows = findings
-    .map(
-      (f, idx) =>
-        `<tr class="audit-row" data-finding-idx="${idx}" role="button" tabindex="0">
+  const aiSum = audit.ai_discrepancy_summary || {};
+  const filtered = filterAuditFindings(findings, auditFindingFilter);
+  const rows = filtered
+    .map(({ f, idx }) => {
+      const bucket = findingFilterBucket(f);
+      const badges = [];
+      if (bucket === "blind_spot") badges.push(`<span class="ai-badge ai-badge-blind">Blind Spot</span>`);
+      else if (bucket === "false_positive") badges.push(`<span class="ai-badge ai-badge-fp">False Positive</span>`);
+      else if (bucket === "verified") badges.push(`<span class="ai-badge ai-badge-verified">AI Verified</span>`);
+      return `<tr class="audit-row" data-finding-idx="${idx}" data-filter-bucket="${bucket}" role="button" tabindex="0">
           <td><code>${escapeHtml(f.finding_id || f.id)}</code></td>
           <td><span class="sev-pill sev-${escapeHtml(f.severity)}">${escapeHtml(f.severity)}</span></td>
-          <td><code>${escapeHtml(f.rule_id)}</code> ${escapeHtml(f.issue || f.title)}</td>
+          <td><code>${escapeHtml(f.rule_id)}</code> ${escapeHtml(f.issue || f.title)} ${badges.join(" ")}</td>
           <td>${escapeHtml(f.language_label || f.language || "")}</td>
           <td>${escapeHtml(f.location || `${f.element_type}:${f.element_name} L${f.line}`)}</td>
           <td>${typeof f.confidence === "number" && f.confidence <= 1 ? Math.round(f.confidence * 100) : f.confidence}%</td>
-        </tr>`
-    )
+        </tr>`;
+    })
     .join("");
+
+  const filterBtn = (id, label, count) => {
+    const active = auditFindingFilter === id ? "active" : "";
+    const countHtml = typeof count === "number" ? ` <span class="filter-count">${count}</span>` : "";
+    return `<button type="button" class="findings-filter ${active}" data-findings-filter="${id}">${label}${countHtml}</button>`;
+  };
+
+  const verifiedCount =
+    typeof aiSum.ai_verified === "number"
+      ? aiSum.ai_verified
+      : findings.filter((f) => findingFilterBucket(f) === "verified").length;
+  const fpCount =
+    typeof aiSum.false_positives === "number"
+      ? aiSum.false_positives
+      : findings.filter((f) => findingFilterBucket(f) === "false_positive").length;
+  const blindCount =
+    typeof aiSum.blind_spots === "number"
+      ? aiSum.blind_spots
+      : findings.filter((f) => findingFilterBucket(f) === "blind_spot").length;
 
   return `
     <section class="overview-section score-section" id="codeAuditSection">
@@ -833,13 +910,33 @@ function renderCodeAuditCard(audit) {
           <p class="score-hint">${findings.length} findings ·
             C:${counts.CRITICAL || 0} H:${counts.HIGH || 0} M:${counts.MEDIUM || 0} L:${counts.LOW || 0}
             · scanned ${audit.blocks_prefiltered || 0}/${audit.blocks_scanned || 0} code blocks
-            · ${audit.llm_enabled ? "LLM on" : "rules-only"}
+            · ${audit.llm_enabled ? "AI discrepancy on" : "rules-only"}
             · click a row for As-Is / To-Be deep-dive</p>
+          <div class="findings-filter-bar" role="toolbar" aria-label="Findings filters">
+            ${filterBtn("all", "All Findings", findings.length)}
+            ${filterBtn("verified", "AI Verified", verifiedCount)}
+            ${filterBtn("false_positive", "Flagged False Positives", fpCount)}
+            ${filterBtn("blind_spot", "AI Discovered Blind Spots", blindCount)}
+          </div>
+          <div class="ai-actions">
+            <button type="button" class="ai-run-btn" id="runAiValidationBtn" ${
+              audit.llm_enabled ? "disabled" : ""
+            }>${audit.llm_enabled ? "AI Validation Complete" : "Run AI Discrepancy Audit"}</button>
+            <span class="score-hint" id="aiValidationStatus">${
+              audit.llm_enabled
+                ? `Verified ${verifiedCount} · FP ${fpCount} · Blind spots ${blindCount}`
+                : "Uses OpenAI to filter false positives and find blind-spot leaks (requires API key on server)."
+            }</span>
+          </div>
         </div>
         ${
           rows
             ? `<table class="overview-table audit-table"><thead><tr><th>ID</th><th>Sev</th><th>Issue</th><th>Lang</th><th>Location</th><th>Conf</th></tr></thead><tbody>${rows}</tbody></table>`
-            : `<p class="placeholder">No handle-leak / memory anti-patterns detected in stored script blocks.</p>`
+            : `<p class="placeholder">${
+                findings.length
+                  ? "No findings match this filter."
+                  : "No handle-leak / memory anti-patterns detected in stored script blocks."
+              }</p>`
         }
         <div id="auditDeepDive" class="audit-deep-dive hidden"></div>
       </div>
@@ -890,12 +987,14 @@ function renderCodeAnalysis() {
   codeAnalysisContent.innerHTML = `
     <div class="overview-header">
       <h2>Code Analysis</h2>
-      <p class="overview-sub">Function inventory with recycle coverage, plus C-API handle findings — click a finding for As-Is / To-Be remediation.</p>
+      <p class="overview-sub">Function inventory with recycle coverage, plus C-API handle findings — click a finding for As-Is / To-Be remediation. Optionally run AI discrepancy audit for false positives and blind spots.</p>
     </div>
     ${renderFunctionInventoryCard(currentFunctionInventory)}
     ${renderCodeAuditCard(currentCodeAudit)}
   `;
   wireCodeAuditDeepDive();
+  wireAuditFindingFilters();
+  wireAiValidationButton();
 }
 
 function renderAsIsSnippet(finding) {
@@ -956,6 +1055,8 @@ function renderAuditDeepDive(finding) {
 
     ${warning ? `<p class="lifecycle-warning">${escapeHtml(warning)}</p>` : ""}
 
+    ${aiValidationBanner(finding)}
+
     <div class="diff-grid">
       <div class="diff-pane">
         <div class="diff-label as-is">As-Is (vulnerable) · highlight = L${escapeHtml(String(hitLine))}</div>
@@ -996,6 +1097,39 @@ function wireCodeAuditDeepDive() {
         handler();
       }
     });
+  });
+}
+
+function wireAuditFindingFilters() {
+  document.querySelectorAll("[data-findings-filter]").forEach((btn) => {
+    btn.addEventListener("click", () => {
+      auditFindingFilter = btn.dataset.findingsFilter || "all";
+      renderCodeAnalysis();
+    });
+  });
+}
+
+async function wireAiValidationButton() {
+  const btn = document.getElementById("runAiValidationBtn");
+  if (!btn || btn.disabled) return;
+  btn.addEventListener("click", async () => {
+    const graphId = graphSelect.value;
+    if (!graphId) return;
+    const status = document.getElementById("aiValidationStatus");
+    btn.disabled = true;
+    btn.textContent = "Running AI audit…";
+    if (status) status.textContent = "Pass 1 false-positive filter + Pass 2 blind-spot detector…";
+    try {
+      const audit = await fetchJson(`/api/graphs/${graphId}/code-audit?llm=true`);
+      currentCodeAudit = audit;
+      auditFindingFilter = "all";
+      renderCodeAnalysis();
+    } catch (err) {
+      btn.disabled = false;
+      btn.textContent = "Run AI Discrepancy Audit";
+      if (status) status.textContent = `AI audit failed: ${err.message}`;
+      showError(err.message);
+    }
   });
 }
 
@@ -1135,6 +1269,7 @@ async function loadSummary(graphId) {
     currentAnalysis = null;
     currentCodeAudit = null;
     currentFunctionInventory = null;
+    auditFindingFilter = "all";
     if (activeView === "overview") {
       overviewContent.innerHTML = `<p class="error">Could not load analysis: ${err.message}. Restart the API server to pick up the latest code.</p>`;
     }
@@ -1470,6 +1605,7 @@ async function loadSelectedGraph() {
   currentAnalysis = null;
   currentCodeAudit = null;
   currentFunctionInventory = null;
+  auditFindingFilter = "all";
   syncEdgeFilterForGraph();
   populateFocusSelect();
   loadSummary(id).catch(() => {});

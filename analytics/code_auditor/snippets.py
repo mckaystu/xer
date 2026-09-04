@@ -81,6 +81,10 @@ PROBLEM_BREAKDOWNS: dict[str, str] = {
         "release the C-API handle the way `Delete doc` does; native memory may linger until "
         "the calling routine terminates."
     ),
+    "DOM-BS-001": (
+        "AI control-flow analysis found a Domino handle allocation path that static regex rules "
+        "missed — typically nested branches, exception paths, or non-standard cleanup gaps."
+    ),
 }
 
 REMEDIATION_GUIDES: dict[str, dict[str, str]] = {
@@ -138,6 +142,16 @@ REMEDIATION_GUIDES: dict[str, dict[str, str]] = {
     },
     "LS-DOM-004": {
         "lotusscript": "Call `Delete doc` before (or instead of) `Set doc = Nothing`.",
+    },
+    "DOM-BS-001": {
+        "lotusscript": (
+            "Trace every Notes* allocation through all branches; `Delete` on every exit path "
+            "(including error handlers) before the Sub ends."
+        ),
+        "java": (
+            "Wrap every Domino acquisition in `try`/`finally` and `.recycle()` on all paths, "
+            "including early returns and catch blocks."
+        ),
     },
 }
 
@@ -326,6 +340,18 @@ def remediation_template(rule_id: str, language: str | None) -> str:
             "' Optional: clear the pointer after Delete\n"
             "Set doc = Nothing"
         ),
+        "DOM-BS-001": (
+            "' AI blind-spot remediation — release on every path\n"
+            "Dim doc As NotesDocument\n"
+            "On Error GoTo Fail\n"
+            "Set doc = db.GetDocumentByUNID(unid$)\n"
+            "' ... work ...\n"
+            "Delete doc\n"
+            "Exit Sub\n"
+            "Fail:\n"
+            "    If Not doc Is Nothing Then Delete doc\n"
+            "    Resume Next"
+        ),
     }
 
     templates_java: dict[str, str] = {
@@ -448,6 +474,15 @@ def remediation_template(rule_id: str, language: str | None) -> str:
             "java.time.LocalDate d = LocalDate.parse(raw);\n"
             "String iso = d.toString();\n"
             "// Convert to Domino DateTime only when writing Items"
+        ),
+        "DOM-BS-001": (
+            "Document doc = null;\n"
+            "try {\n"
+            "  doc = db.getDocumentByUNID(unid);\n"
+            "  // ... work ...\n"
+            "} finally {\n"
+            "  if (doc != null) doc.recycle(); // every exit path\n"
+            "}"
         ),
     }
 

@@ -94,6 +94,11 @@ RULE_CATALOG: dict[str, dict[str, str]] = {
         "category": "LotusScript Handle Lifecycle",
         "default_severity": "MEDIUM",
     },
+    "DOM-BS-001": {
+        "title": "Uncovered Handle Leak (AI Blind Spot)",
+        "category": "AI Discrepancy & Blind Spots",
+        "default_severity": "HIGH",
+    },
 }
 
 
@@ -143,6 +148,11 @@ class Finding:
     problem_breakdown: str = ""
     remediation_guide: str = ""
     language_label: str = ""
+    # AI discrepancy / blind-spot metadata (populated when --llm is active)
+    ai_validation_status: str = ""  # VERIFIED | FALSE_POSITIVE | BLIND_SPOT | ""
+    ai_validation_reasoning: str = ""
+    is_blind_spot: bool = False
+    is_false_positive: bool = False
 
     def confidence_band(self) -> ConfidenceBand:
         if self.confidence >= 90:
@@ -185,11 +195,26 @@ class AuditReport:
     llm_enabled: bool = False
     notes: list[str] = field(default_factory=list)
 
+    def active_findings(self) -> list[Finding]:
+        """Findings that still count toward risk (excludes AI false positives)."""
+        return [f for f in self.findings if not f.is_false_positive]
+
     def severity_counts(self) -> dict[str, int]:
         counts = {"CRITICAL": 0, "HIGH": 0, "MEDIUM": 0, "LOW": 0}
-        for f in self.findings:
+        for f in self.active_findings():
             counts[f.severity] = counts.get(f.severity, 0) + 1
         return counts
+
+    def ai_discrepancy_summary(self) -> dict[str, int]:
+        verified = sum(1 for f in self.findings if f.ai_validation_status == "VERIFIED")
+        fps = sum(1 for f in self.findings if f.is_false_positive)
+        blinds = sum(1 for f in self.findings if f.is_blind_spot)
+        return {
+            "ai_verified": verified,
+            "false_positives": fps,
+            "blind_spots": blinds,
+            "active_findings": len(self.active_findings()),
+        }
 
     def risk_score(self) -> str:
         counts = self.severity_counts()
@@ -199,7 +224,7 @@ class AuditReport:
             return "HIGH"
         if counts["HIGH"] >= 1 or counts["MEDIUM"] >= 5:
             return "MEDIUM"
-        if self.findings:
+        if self.active_findings():
             return "LOW"
         return "LOW"
 
@@ -213,5 +238,6 @@ class AuditReport:
             "notes": self.notes,
             "severity_counts": self.severity_counts(),
             "handle_exhaustion_risk": self.risk_score(),
+            "ai_discrepancy_summary": self.ai_discrepancy_summary(),
             "findings": [f.to_dict() for f in self.findings],
         }
