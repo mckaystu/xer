@@ -754,13 +754,29 @@ function renderFunctionInventoryCard(inventory) {
     return `<section class="overview-section"><h2>Function &amp; Recycle Inventory</h2><p class="placeholder">Inventory not available for this graph.</p></section>`;
   }
   const s = inventory.summary;
-  const rate = typeof s.recycle_coverage_rate === "number" ? s.recycle_coverage_rate : 0;
-  const riskClass = coverageRiskClass(rate);
   const scanned = s.total_functions_scanned || 0;
   const allocating = s.functions_allocating_handles || 0;
   const withCleanup = s.functions_with_cleanup || 0;
   const unprotected = s.unprotected_functions || 0;
-  const safeNoHandles = Math.max(0, scanned - allocating);
+  const safeNoHandles =
+    typeof s.functions_safe_no_handles === "number"
+      ? s.functions_safe_no_handles
+      : Math.max(0, scanned - allocating);
+  // Primary ring: overall handle safety (safe + protected) / scanned
+  const safetyRate =
+    typeof s.handle_safety_rate === "number"
+      ? s.handle_safety_rate
+      : scanned
+        ? Math.round(((safeNoHandles + withCleanup) / scanned) * 1000) / 10
+        : 100;
+  // Secondary: cleanup only among allocators
+  const recycleAmongAllocators =
+    typeof s.recycle_coverage_rate === "number"
+      ? s.recycle_coverage_rate
+      : allocating
+        ? Math.round((withCleanup / allocating) * 1000) / 10
+        : 100;
+  const riskClass = coverageRiskClass(safetyRate);
   const rows = (inventory.inventory || [])
     .map(
       (f, idx) =>
@@ -777,37 +793,41 @@ function renderFunctionInventoryCard(inventory) {
     )
     .join("");
 
-  const rateExplainer =
-    allocating === 0
-      ? `<p class="coverage-explainer">No Domino handle allocations were detected, so coverage defaults to 100% (nothing to recycle).</p>`
-      : `<p class="coverage-explainer">
-          <strong>${rate}%</strong> =
-          <strong>${withCleanup}</strong> with cleanup
-          ÷ <strong>${allocating}</strong> that allocate handles
-          × 100.
-          The other <strong>${safeNoHandles}</strong> of ${scanned} scanned functions are
-          <em>Safe (no handles)</em> and are <strong>not</strong> in this percentage.
-          ${
-            rate === 0
-              ? ` Right now every handle-allocating function is missing <code>Delete</code> / <code>.recycle()</code> — open an <strong>Unprotected</strong> row below to see the code.`
-              : ""
-          }
-        </p>`;
+  const rateExplainer = `
+    <div class="coverage-explainer">
+      <p>
+        <strong>Handle safety ${safetyRate}%</strong> =
+        (<strong>${safeNoHandles}</strong> safe with no handles
+        + <strong>${withCleanup}</strong> allocate-and-cleanup)
+        ÷ <strong>${scanned}</strong> scanned
+        × 100.
+      </p>
+      <p class="coverage-sub">
+        Of the <strong>${allocating}</strong> functions that actually allocate Domino handles,
+        <strong>${withCleanup}</strong> clean up (<strong>${recycleAmongAllocators}%</strong> recycle coverage)
+        and <strong>${unprotected}</strong> are unprotected.
+        ${
+          unprotected > 0
+            ? ` Open an <strong>Unprotected</strong> row below to see the missing <code>Delete</code> / <code>.recycle()</code>.`
+            : ""
+        }
+      </p>
+    </div>`;
 
   return `
     <section class="overview-section score-section" id="functionInventorySection">
       <h2>Function &amp; Recycle Inventory</h2>
       <div class="score-card ${riskClass}">
         <div class="score-main">
-          <div class="score-ring" aria-label="Recycle coverage rate">
-            <span class="score-value">${rate}</span>
+          <div class="score-ring" aria-label="Handle safety rate">
+            <span class="score-value">${safetyRate}</span>
             <span class="score-max">%</span>
           </div>
           <div class="score-copy">
-            <p class="score-rating">Recycle Coverage Rate</p>
+            <p class="score-rating">Handle Safety Rate</p>
             <p class="score-hint">
-              Of functions that open Domino objects (<code>NotesDocument</code>, views, etc.),
-              what share also call <code>Delete</code> (LotusScript) or <code>.recycle()</code> (Java/SSJS)?
+              Share of <em>all</em> scanned functions that are either handle-free or that allocate
+              and also call <code>Delete</code> / <code>.recycle()</code>.
             </p>
             <div class="score-metrics inventory-metrics">
               <div class="metric"><span class="metric-label">Functions scanned</span><strong>${scanned}</strong></div>
@@ -815,6 +835,7 @@ function renderFunctionInventoryCard(inventory) {
               <div class="metric"><span class="metric-label">Allocate handles</span><strong>${allocating}</strong></div>
               <div class="metric"><span class="metric-label">With cleanup</span><strong>${withCleanup}</strong></div>
               <div class="metric"><span class="metric-label">Unprotected</span><strong>${unprotected}</strong></div>
+              <div class="metric"><span class="metric-label">Recycle among allocators</span><strong>${recycleAmongAllocators}%</strong></div>
             </div>
           </div>
         </div>
@@ -1066,7 +1087,7 @@ function renderCodeAuditTeaser(audit, inventory) {
   }
   const counts = audit?.severity_counts || {};
   const risk = audit?.handle_exhaustion_risk || "LOW";
-  const rate = inventory?.summary?.recycle_coverage_rate;
+  const rate = inventory?.summary?.handle_safety_rate ?? inventory?.summary?.recycle_coverage_rate;
   const riskClass =
     risk === "CRITICAL" || risk === "HIGH" || (typeof rate === "number" && rate < 40)
       ? "risk-high"

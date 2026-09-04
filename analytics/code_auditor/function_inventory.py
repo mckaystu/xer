@@ -467,13 +467,26 @@ def summarize_inventory(records: list[FunctionRecord]) -> dict[str, Any]:
     allocating = [r for r in records if r.allocates_handles]
     with_cleanup = [r for r in allocating if r.recycle_call_count >= 1]
     unprotected = [r for r in allocating if r.recycle_call_count == 0]
-    rate = round((len(with_cleanup) / len(allocating)) * 100.0, 1) if allocating else 100.0
+    safe = [r for r in records if not r.allocates_handles]
+    # Among allocators only: share that clean up
+    recycle_among_allocators = (
+        round((len(with_cleanup) / len(allocating)) * 100.0, 1) if allocating else 100.0
+    )
+    # Overall: share of all functions that are not an unprotected leak risk
+    # (safe-no-handles + protected) / total — matches "31 of 40 are fine" intuition
+    handle_safety_rate = (
+        round(((len(safe) + len(with_cleanup)) / total) * 100.0, 1) if total else 100.0
+    )
     return {
         "total_functions_scanned": total,
+        "functions_safe_no_handles": len(safe),
         "functions_allocating_handles": len(allocating),
         "functions_with_cleanup": len(with_cleanup),
         "unprotected_functions": len(unprotected),
-        "recycle_coverage_rate": rate,
+        # Primary UX metric (ring)
+        "handle_safety_rate": handle_safety_rate,
+        # Secondary: cleanup rate among allocators only
+        "recycle_coverage_rate": recycle_among_allocators,
     }
 
 

@@ -908,6 +908,13 @@ th { color: var(--muted); font-weight: 500; }
   line-height: 1.45;
   color: var(--text);
 }
+.coverage-explainer p {
+  margin: 0;
+}
+.coverage-explainer .coverage-sub {
+  margin-top: 8px;
+  color: var(--muted);
+}
 .risk-low .coverage-explainer {
   border-color: rgba(106, 191, 105, 0.35);
   background: rgba(106, 191, 105, 0.08);
