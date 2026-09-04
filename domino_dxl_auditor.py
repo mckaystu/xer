@@ -139,7 +139,8 @@ def main(argv: list[str] | None = None) -> int:
             f"{s['functions_allocating_handles']} allocate handles · "
             f"{s['functions_with_cleanup']} with cleanup · "
             f"{s['unprotected_functions']} unprotected · "
-            f"recycle coverage {s['recycle_coverage_rate']}%"
+            f"handle safety {s.get('handle_safety_rate', s['recycle_coverage_rate'])}% "
+            f"(recycle among allocators {s['recycle_coverage_rate']}%)"
         )
         print(f"Wrote {inv_path}")
         if args.inventory_only:
