@@ -20,13 +20,14 @@ from analytics.code_auditor.models import CodeUnit
 
 FunctionStatus = Literal["SAFE_NO_HANDLES", "PROTECTED", "UNPROTECTED_ALLOCATION"]
 
-# Domino handle allocation heuristics (case-insensitive word / call matches)
+# Domino handle allocation heuristics (Java / SSJS — word matches)
 ALLOCATION_PATTERNS: list[re.Pattern[str]] = [
     re.compile(r"\bNotesDocument\b", re.I),
     re.compile(r"\bNotesView\b", re.I),
     re.compile(r"\bNotesDatabase\b", re.I),
     re.compile(r"\bNotesViewEntry\b", re.I),
     re.compile(r"\bNotesViewNavigator\b", re.I),
+    re.compile(r"\bNotesViewNav\b", re.I),
     re.compile(r"\bNotesDateTime\b", re.I),
     re.compile(r"\bDocument\b"),
     re.compile(r"\bView\b"),
@@ -44,6 +45,21 @@ ALLOCATION_PATTERNS: list[re.Pattern[str]] = [
     re.compile(r"\bgetAllDocumentsByKey\b", re.I),
     re.compile(r"\bgetView\b", re.I),
     re.compile(r"\bgetDatabase\b", re.I),
+]
+
+# LotusScript-specific allocation (Delete / Notes* semantics — no bare Document/View)
+LS_ALLOCATION_PATTERNS: list[re.Pattern[str]] = [
+    re.compile(r"\bNotesDocument\b", re.I),
+    re.compile(r"\bNotesView\b", re.I),
+    re.compile(r"\bNotesDatabase\b", re.I),
+    re.compile(r"\bNotesViewEntry\b", re.I),
+    re.compile(r"\bNotesViewNav(?:igator)?\b", re.I),
+    re.compile(r"\bGetDocumentByUNID\b", re.I),
+    re.compile(r"\bGetFirstDocument\b", re.I),
+    re.compile(r"\bGetNextDocument\b", re.I),
+    re.compile(r"\bGetEntryByKey\b", re.I),
+    re.compile(r"\bGetNextEntry\b", re.I),
+    re.compile(r"\bCreateDocument\b", re.I),
 ]
 
 # LotusScript: Sub / Function (skip Declare …)
@@ -109,19 +125,32 @@ def _design_element(unit: CodeUnit) -> str:
     return f"{unit.element_type}:{unit.element_name}"
 
 
-def _count_allocates(body: str) -> bool:
-    return any(p.search(body) for p in ALLOCATION_PATTERNS)
+def _is_lotusscript_lang(lang: str) -> bool:
+    low = (lang or "").lower()
+    return "lotus" in low or low in {"ls", "lss", "notes"}
 
 
-def _count_cleanup(body: str) -> int:
+def _count_allocates(body: str, language: str = "") -> bool:
+    patterns = LS_ALLOCATION_PATTERNS if _is_lotusscript_lang(language) else ALLOCATION_PATTERNS
+    return any(p.search(body) for p in patterns)
+
+
+def _count_cleanup(body: str, language: str = "") -> int:
     """Count explicit cleanup statements without double-counting Call x.recycle()."""
-    # Prefer a unified pass: mark spans already counted
-    patterns = [
-        re.compile(r"\bCall\s+\w+\.recycle\s*\([^)]*\)", re.I),
-        re.compile(r"\.recycle\s*\([^)]*\)", re.I),
-        re.compile(r"\bDelete\s+\w+", re.I),
-        re.compile(r"\brecycleLotuses\s*\([^)]*\)", re.I),
-    ]
+    if _is_lotusscript_lang(language):
+        # LotusScript: Delete <var> and Call <var>.Recycle() / <var>.Recycle()
+        patterns = [
+            re.compile(r"\bCall\s+\w+\.Recycle\s*\([^)]*\)", re.I),
+            re.compile(r"\b\w+\.Recycle\s*\([^)]*\)", re.I),
+            re.compile(r"\bDelete\s+\w+", re.I),
+        ]
+    else:
+        patterns = [
+            re.compile(r"\bCall\s+\w+\.recycle\s*\([^)]*\)", re.I),
+            re.compile(r"\.recycle\s*\([^)]*\)", re.I),
+            re.compile(r"\bDelete\s+\w+", re.I),
+            re.compile(r"\brecycleLotuses\s*\([^)]*\)", re.I),
+        ]
     occupied: list[tuple[int, int]] = []
     total = 0
     for pattern in patterns:
@@ -280,8 +309,8 @@ def build_inventory(units: Iterable[CodeUnit]) -> list[FunctionRecord]:
     for unit in units:
         for name, fn_body, start_line in extract_functions_from_unit(unit):
             seq += 1
-            allocates = _count_allocates(fn_body)
-            recycle_count = _count_cleanup(fn_body)
+            allocates = _count_allocates(fn_body, unit.language)
+            recycle_count = _count_cleanup(fn_body, unit.language)
             status = _classify(allocates, recycle_count)
             records.append(
                 FunctionRecord(

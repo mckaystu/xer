@@ -3,8 +3,9 @@
 Domino DXL Code Analysis & AI Quality Auditor
 
 Scans DXL exports or On-Disk Project sources for Domino C-API handle leaks,
-ODA vs lotus.domino conflicts, static handle lifetime bugs, and expensive
-data-access patterns. Emits a console summary plus Markdown/JSON reports.
+ODA vs lotus.domino conflicts, static handle lifetime bugs, expensive
+data-access patterns, and LotusScript-native Delete lifecycle issues
+(LS-DOM-001..004). Emits a console summary plus Markdown/JSON reports.
 
 Setup
 -----

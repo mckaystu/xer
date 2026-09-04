@@ -74,6 +74,26 @@ RULE_CATALOG: dict[str, dict[str, str]] = {
         "category": "C-API Handle Leaks & Object Recycling",
         "default_severity": "MEDIUM",
     },
+    "LS-DOM-001": {
+        "title": "Loop Iteration Without Delete",
+        "category": "LotusScript Handle Lifecycle",
+        "default_severity": "CRITICAL",
+    },
+    "LS-DOM-002": {
+        "title": "In-Loop Lookup Document Leaks",
+        "category": "LotusScript Handle Lifecycle",
+        "default_severity": "HIGH",
+    },
+    "LS-DOM-003": {
+        "title": "Module / Global Public Notes Object Declarations",
+        "category": "LotusScript Handle Lifecycle",
+        "default_severity": "CRITICAL",
+    },
+    "LS-DOM-004": {
+        "title": "Set Nothing Without Delete",
+        "category": "LotusScript Handle Lifecycle",
+        "default_severity": "MEDIUM",
+    },
 }
 
 

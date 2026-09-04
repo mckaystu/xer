@@ -62,6 +62,25 @@ PROBLEM_BREAKDOWNS: dict[str, str] = {
         "The loop variable is re-assigned with `GetNextDocument(doc)` / `getNextDocument(doc)` "
         "without releasing the previous handle first, dropping the only reference to it."
     ),
+    "LS-DOM-001": (
+        "A LotusScript `Do While` / `Do Until` / `Forall` / `While` loop advances documents or "
+        "view entries with `GetNextDocument` / `GetNextEntry` but never `Delete`s the previous "
+        "handle. Each iteration leaves a native C-API object pinned until the Sub exits."
+    ),
+    "LS-DOM-002": (
+        "Inside a loop, a secondary `GetDocumentByUNID` / `GetDocumentByKey` / `CreateDocument` "
+        "assigns a NotesDocument that is never `Delete`d before the next iteration, leaking "
+        "one handle per pass."
+    ),
+    "LS-DOM-003": (
+        "`Public … As NotesDocument|NotesDatabase|NotesView` in (Declarations) pins native "
+        "handles in server RAM across agent and library executions."
+    ),
+    "LS-DOM-004": (
+        "`Set doc = Nothing` clears the LotusScript pointer variable but does not explicitly "
+        "release the C-API handle the way `Delete doc` does; native memory may linger until "
+        "the calling routine terminates."
+    ),
 }
 
 REMEDIATION_GUIDES: dict[str, dict[str, str]] = {
@@ -98,6 +117,27 @@ REMEDIATION_GUIDES: dict[str, dict[str, str]] = {
     "DOM-013": {
         "lotusscript": "Use a temp `nextDoc`, `Delete doc`, then `Set doc = nextDoc`.",
         "java": "Use a temp `next`, `doc.recycle()`, then `doc = next`.",
+    },
+    "LS-DOM-001": {
+        "lotusscript": (
+            "Capture `nextDoc` first, finish work on `doc`, then `Delete doc` before "
+            "`Set doc = nextDoc`."
+        ),
+    },
+    "LS-DOM-002": {
+        "lotusscript": (
+            "After each in-loop lookup/create, `Delete lookupDoc` (or set to a fresh handle "
+            "only after Delete) before the next iteration."
+        ),
+    },
+    "LS-DOM-003": {
+        "lotusscript": (
+            "Do not declare Public NotesDocument/Database/View in (Declarations). Dim them "
+            "inside the Sub and Delete before Exit; persist UniversalIDs if needed."
+        ),
+    },
+    "LS-DOM-004": {
+        "lotusscript": "Call `Delete doc` before (or instead of) `Set doc = Nothing`.",
     },
 }
 
@@ -227,6 +267,64 @@ def remediation_template(rule_id: str, language: str | None) -> str:
             "' Prefer native date math outside Domino DateTime when formatting in loops\n"
             "formatted$ = Format$(theDate, \"yyyymmdd\")\n"
             "' Create NotesDateTime only when writing an item"
+        ),
+        "LS-DOM-001": (
+            "' REMEDIATED LOTUSSCRIPT LOOP PATTERN\n"
+            "Dim doc As NotesDocument\n"
+            "Dim nextDoc As NotesDocument\n"
+            "\n"
+            "Set doc = view.GetFirstDocument()\n"
+            "Do While Not (doc Is Nothing)\n"
+            "    ' 1. Fetch next handle first\n"
+            "    Set nextDoc = view.GetNextDocument(doc)\n"
+            "\n"
+            "    ' 2. Process current document\n"
+            "    ' ...\n"
+            "\n"
+            "    ' 3. Explicitly release C-API handle\n"
+            "    Delete doc\n"
+            "\n"
+            "    ' 4. Advance pointer\n"
+            "    Set doc = nextDoc\n"
+            "Loop"
+        ),
+        "LS-DOM-002": (
+            "Do While Not (doc Is Nothing)\n"
+            "    Dim lookupDoc As NotesDocument\n"
+            "    Set lookupDoc = db.GetDocumentByUNID(unid$)\n"
+            "    If Not lookupDoc Is Nothing Then\n"
+            "        ' ... use lookupDoc ...\n"
+            "        Delete lookupDoc   ' release before next iteration\n"
+            "    End If\n"
+            "\n"
+            "    Set nextDoc = view.GetNextDocument(doc)\n"
+            "    Delete doc\n"
+            "    Set doc = nextDoc\n"
+            "Loop"
+        ),
+        "LS-DOM-003": (
+            "' BAD — pins C-API memory across executions:\n"
+            "' Public gDoc As NotesDocument\n"
+            "' Public gDb As NotesDatabase\n"
+            "' Public gView As NotesView\n"
+            "\n"
+            "' GOOD — local lifetime + Delete:\n"
+            "Sub ProcessOrder(unid As String)\n"
+            "    Dim db As NotesDatabase\n"
+            "    Dim doc As NotesDocument\n"
+            "    Set db = session.CurrentDatabase\n"
+            "    Set doc = db.GetDocumentByUNID(unid)\n"
+            "    ' ... work ...\n"
+            "    If Not doc Is Nothing Then Delete doc\n"
+            "End Sub"
+        ),
+        "LS-DOM-004": (
+            "' Prefer explicit Delete — Nothing alone delays native release\n"
+            "If Not doc Is Nothing Then\n"
+            "    Delete doc\n"
+            "End If\n"
+            "' Optional: clear the pointer after Delete\n"
+            "Set doc = Nothing"
         ),
     }
 

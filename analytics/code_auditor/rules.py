@@ -41,10 +41,11 @@ RE_STATIC_HANDLE = re.compile(
     r"DocumentCollection|DateTime|Name|AgentContext)\b",
     re.I,
 )
-# LotusScript module-level Static / Public handle fields (not ordinary Dim locals in Subs)
+# LotusScript module-level Static handle fields (Public NotesDocument/Database/View → LS-DOM-003)
 RE_LS_STATIC = re.compile(
-    r"(?m)^\s*(?:Static|Public)\s+\w+\s+As\s+Notes(?:Session|Database|Document|View|DateTime|Name)\b",
-    re.I,
+    r"^\s*Static\s+\w+\s+As\s+Notes(?:Session|Database|Document|View|DateTime|Name)\b"
+    r"|^\s*Public\s+\w+\s+As\s+Notes(?:Session|DateTime|Name)\b",
+    re.I | re.M,
 )
 RE_SCOPE_CACHE = re.compile(
     r"(?:sessionScope|applicationScope|viewScope)\s*(?:\.|\[)\s*[\"']?\w*[\"']?\s*\]?\s*=\s*[^\n;]+"
@@ -201,6 +202,10 @@ def detect_dom001(unit: CodeUnit) -> list[Finding]:
 
 
 def detect_dom002(unit: CodeUnit) -> list[Finding]:
+    # LotusScript loops are owned by LS-DOM-001 (Delete semantics, not .recycle())
+    lang = (unit.language or "").lower()
+    if "lotus" in lang or lang in {"ls", "lss", "notes"}:
+        return []
     if not RE_LOOP.search(unit.body) or not RE_GET_NEXT.search(unit.body):
         return []
     # Loop with getNext* but no recycle nearby → high risk
@@ -631,6 +636,10 @@ def detect_dom012(unit: CodeUnit) -> list[Finding]:
 
 def detect_dom013(unit: CodeUnit) -> list[Finding]:
     """Re-assign loop variable via getNext*(sameVar) without recycling first."""
+    # LotusScript reassignment leaks are owned by LS-DOM-001 (Delete before advance)
+    lang = (unit.language or "").lower()
+    if "lotus" in lang or lang in {"ls", "lss", "notes"}:
+        return []
     findings: list[Finding] = []
     for match in RE_UNSAFE_REASSIGN.finditer(unit.body):
         var = match.group("var") or match.group("var2") or "doc"
@@ -684,9 +693,15 @@ DETECTORS = [
 
 
 def run_rule_engine(units: Iterable[CodeUnit]) -> list[Finding]:
+    from analytics.code_auditor.ls_rules import LS_DETECTORS, bind_helpers
+
+    bind_helpers(finding=_finding, line_of=_line_of, snippet=_snippet)
+
     findings: list[Finding] = []
     for unit in units:
         for detector in DETECTORS:
+            findings.extend(detector(unit))
+        for detector in LS_DETECTORS:
             findings.extend(detector(unit))
     # Assign stable IDs
     for idx, finding in enumerate(findings, start=1):
