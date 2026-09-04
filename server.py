@@ -129,6 +129,34 @@ def api_graph_analysis(graph_id: str, refresh: bool = Query(False)) -> dict[str,
     return payload
 
 
+@app.get("/api/graphs/{graph_id}/code-audit")
+def api_graph_code_audit(
+    graph_id: str,
+    llm: bool = Query(False, description="Enable OpenAI enrichment when OPENAI_API_KEY is configured"),
+) -> dict[str, Any]:
+    """Static Domino handle/memory anti-pattern audit for code stored in the graph."""
+    from analytics.code_auditor import run_audit
+    from neon_db import get_graph
+
+    try:
+        row = get_graph(graph_id)
+    except (ValueError, ConnectionError) as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    if not row:
+        raise HTTPException(status_code=404, detail="Graph not found")
+
+    try:
+        report = run_audit(
+            row.get("nsf_path") or graph_id,
+            graph=row["graph"],
+            use_llm=llm,
+            out_dir=None,
+        )
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(status_code=422, detail=f"Code audit failed: {exc}") from exc
+    return report.to_dict()
+
+
 @app.post("/api/synthesize")
 def api_synthesize_local(body: StoreGraphRequest, rules_limit: int = Query(50, ge=1, le=200)) -> dict[str, Any]:
     from graph_synthesis import synthesize

@@ -6,3 +6,6 @@ __pycache__/
 .venv/
 .vercel
 public/
+analysis/
+application_graph_xboss.json
+dxl_input_xboss/

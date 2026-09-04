@@ -834,6 +834,19 @@ th { color: var(--muted); font-weight: 500; }
 .risk-moderate .metric-bar i { background: #c9a227; }
 .risk-high .metric-bar i { background: #e08080; }
 
+.sev-pill {
+  display: inline-block;
+  font-size: 0.65rem;
+  font-weight: 700;
+  letter-spacing: 0.03em;
+  padding: 2px 6px;
+  border-radius: 4px;
+}
+.sev-CRITICAL { background: rgba(192, 96, 96, 0.25); color: #f0a0a0; }
+.sev-HIGH { background: rgba(224, 123, 57, 0.22); color: #f0b080; }
+.sev-MEDIUM { background: rgba(201, 162, 39, 0.2); color: #e0c860; }
+.sev-LOW { background: rgba(106, 191, 105, 0.15); color: #8ee08c; }
+
 .metric-sub {
   margin: 4px 0 0;
   font-size: 0.68rem;

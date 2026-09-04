@@ -99,6 +99,7 @@ let network = null;
 let currentViz = null;
 let currentSummary = null;
 let currentAnalysis = null;
+let currentCodeAudit = null;
 let fullGraph = null;
 let activeView = "focus";
 let focusNodeId = null;
@@ -726,6 +727,49 @@ function renderRulesCatalog() {
   rulesContent.innerHTML = sections;
 }
 
+function renderCodeAuditCard(audit) {
+  if (!audit) {
+    return `<section class="overview-section"><h2>Code Quality Audit</h2><p class="placeholder">Audit not available.</p></section>`;
+  }
+  const counts = audit.severity_counts || {};
+  const risk = audit.handle_exhaustion_risk || "LOW";
+  const riskClass =
+    risk === "CRITICAL" || risk === "HIGH" ? "risk-high" : risk === "MEDIUM" ? "risk-moderate" : "risk-low";
+  const findings = (audit.findings || []).slice(0, 12);
+  const rows = findings
+    .map(
+      (f) =>
+        `<tr>
+          <td><code>${escapeHtml(f.id)}</code></td>
+          <td><span class="sev-pill sev-${escapeHtml(f.severity)}">${escapeHtml(f.severity)}</span></td>
+          <td><code>${escapeHtml(f.rule_id)}</code> ${escapeHtml(f.title)}</td>
+          <td>${escapeHtml(f.element_type)}:${escapeHtml(f.element_name)} <span class="muted">L${f.line}</span></td>
+          <td>${f.confidence}%</td>
+        </tr>`
+    )
+    .join("");
+
+  return `
+    <section class="overview-section score-section">
+      <h2>Code Quality Audit</h2>
+      <div class="score-card ${riskClass}">
+        <div class="score-copy" style="margin-bottom:12px">
+          <p class="score-rating">Handle Exhaustion Risk: ${escapeHtml(risk)}</p>
+          <p class="score-hint">${audit.findings?.length || 0} findings ·
+            C:${counts.CRITICAL || 0} H:${counts.HIGH || 0} M:${counts.MEDIUM || 0} L:${counts.LOW || 0}
+            · scanned ${audit.blocks_prefiltered || 0}/${audit.blocks_scanned || 0} code blocks
+            · ${audit.llm_enabled ? "LLM on" : "rules-only"}</p>
+        </div>
+        ${
+          rows
+            ? `<table class="overview-table"><thead><tr><th>ID</th><th>Sev</th><th>Issue</th><th>Location</th><th>Conf</th></tr></thead><tbody>${rows}</tbody></table>`
+            : `<p class="placeholder">No handle-leak / memory anti-patterns detected in stored script blocks.</p>`
+        }
+      </div>
+    </section>
+  `;
+}
+
 function renderOverview(summary) {
   if (!summary) {
     overviewContent.innerHTML = `<p class="placeholder">No analysis available.</p>`;
@@ -738,6 +782,7 @@ function renderOverview(summary) {
   const lifecycles = summary.document_lifecycles || [];
   const dbs = summary.databases || [];
   const scoreCard = renderModernizationCard(currentAnalysis?.modernization_score);
+  const auditCard = renderCodeAuditCard(currentCodeAudit);
 
   const dbHtml = dbs.length
     ? `<section class="overview-section"><h2>Databases (${dbs.length})</h2><ul class="overview-list">${dbs
@@ -804,6 +849,7 @@ function renderOverview(summary) {
       <div class="edge-pills">${edgeSummary}</div>
     </div>
     ${scoreCard}
+    ${auditCard}
     ${dbHtml}
     <section class="overview-section">
       <h2>Business Capabilities</h2>
@@ -837,17 +883,20 @@ function renderOverview(summary) {
 async function loadSummary(graphId) {
   try {
     overviewContent.innerHTML = `<p class="placeholder">Loading application analysis…</p>`;
-    const [summary, analysis] = await Promise.all([
+    const [summary, analysis, codeAudit] = await Promise.all([
       fetchJson(`/api/graphs/${graphId}/summary`),
       fetchJson(`/api/graphs/${graphId}/analysis`).catch(() => null),
+      fetchJson(`/api/graphs/${graphId}/code-audit`).catch(() => null),
     ]);
     currentSummary = summary;
     currentAnalysis = analysis;
+    currentCodeAudit = codeAudit;
     if (activeView === "overview") renderOverview(currentSummary);
     if (activeView === "rules") renderRulesCatalog();
   } catch (err) {
     currentSummary = null;
     currentAnalysis = null;
+    currentCodeAudit = null;
     if (activeView === "overview") {
       overviewContent.innerHTML = `<p class="error">Could not load analysis: ${err.message}. Restart the API server to pick up the latest code.</p>`;
     }
@@ -1174,6 +1223,7 @@ async function loadSelectedGraph() {
   focusTargetId = null;
   currentSummary = null;
   currentAnalysis = null;
+  currentCodeAudit = null;
   syncEdgeFilterForGraph();
   populateFocusSelect();
   loadSummary(id).catch(() => {});
