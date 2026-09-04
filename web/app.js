@@ -773,19 +773,37 @@ function renderCodeAuditCard(audit) {
   `;
 }
 
+function renderAsIsSnippet(finding) {
+  const lines = finding.code_snippet_lines;
+  if (Array.isArray(lines) && lines.length) {
+    return `<div class="diff-code snippet-lines" role="region" aria-label="As-Is code">${lines
+      .map((row) => {
+        const cls = row.highlight ? "snippet-line is-highlight" : "snippet-line";
+        return `<div class="${cls}"><span class="snippet-ln">${row.line}</span><span class="snippet-tx">${escapeHtml(row.text || "")}</span></div>`;
+      })
+      .join("")}</div>`;
+  }
+  // Fallback: plain text with ▶ marker styling via CSS on containing pre
+  const asIs = finding.code_snippet_as_is || finding.evidence || "";
+  return `<pre class="diff-code">${escapeHtml(asIs)}</pre>`;
+}
+
 function renderAuditDeepDive(finding) {
   if (!finding) return "";
   const conf =
     typeof finding.confidence === "number" && finding.confidence <= 1
       ? Math.round(finding.confidence * 100)
       : finding.confidence;
-  const asIs = finding.code_snippet_as_is || finding.evidence || "";
   const toBe = finding.code_snippet_to_be || finding.remediation || "";
   const warning = finding.handle_lifecycle_warning || finding.technical_impact || "";
+  const problem = finding.problem_breakdown || warning;
+  const guide = finding.remediation_guide || finding.action_required || "";
+  const lang = finding.language_label || finding.language || "";
   const lineRange =
     finding.line_number_start && finding.line_number_end
       ? `L${finding.line_number_start}–${finding.line_number_end}`
       : `L${finding.line_number || finding.line}`;
+  const hitLine = finding.highlight_line || finding.line_number || finding.line;
 
   return `
     <div class="deep-dive-header">
@@ -793,19 +811,33 @@ function renderAuditDeepDive(finding) {
         <h3>${escapeHtml(finding.finding_id || finding.id)} · [${escapeHtml(finding.rule_id)}] ${escapeHtml(finding.issue || finding.title)}</h3>
         <p class="score-hint">
           <span class="sev-pill sev-${escapeHtml(finding.severity)}">${escapeHtml(finding.severity)}</span>
-          · Confidence ${conf}% · ${escapeHtml(finding.location || "")} · ${escapeHtml(lineRange)}
+          · Confidence ${conf}% · ${escapeHtml(lang)} · ${escapeHtml(finding.location || "")} · ${escapeHtml(lineRange)}
+          · hit <strong>L${escapeHtml(String(hitLine))}</strong>
         </p>
       </div>
       <button type="button" class="deep-dive-close" id="auditDeepDiveClose">Close</button>
     </div>
+
+    <div class="deep-dive-guides">
+      <div class="guide-card problem">
+        <h4>Problem Breakdown</h4>
+        <p>${escapeHtml(problem)}</p>
+      </div>
+      <div class="guide-card fix">
+        <h4>Remediation Guide</h4>
+        <p>${escapeHtml(guide)}</p>
+      </div>
+    </div>
+
     ${warning ? `<p class="lifecycle-warning">${escapeHtml(warning)}</p>` : ""}
+
     <div class="diff-grid">
       <div class="diff-pane">
-        <div class="diff-label as-is">As-Is (vulnerable)</div>
-        <pre class="diff-code">${escapeHtml(asIs)}</pre>
+        <div class="diff-label as-is">As-Is (vulnerable) · highlight = L${escapeHtml(String(hitLine))}</div>
+        ${renderAsIsSnippet(finding)}
       </div>
       <div class="diff-pane">
-        <div class="diff-label to-be">To-Be (safe recycle)</div>
+        <div class="diff-label to-be">To-Be (${escapeHtml(lang || "safe recycle")})</div>
         <pre class="diff-code">${escapeHtml(toBe)}</pre>
       </div>
     </div>

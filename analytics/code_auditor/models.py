@@ -115,9 +115,14 @@ class Finding:
     engine: str = "rules"  # rules | llm | hybrid
     code_snippet_as_is: str = ""
     code_snippet_to_be: str = ""
+    code_snippet_lines: list = field(default_factory=list)
     line_number_start: int = 0
     line_number_end: int = 0
+    highlight_line: int = 0
     handle_lifecycle_warning: str = ""
+    problem_breakdown: str = ""
+    remediation_guide: str = ""
+    language_label: str = ""
 
     def confidence_band(self) -> ConfidenceBand:
         if self.confidence >= 90:
@@ -143,6 +148,10 @@ class Finding:
             data["code_snippet_as_is"] = self.evidence
         if not data.get("handle_lifecycle_warning"):
             data["handle_lifecycle_warning"] = self.technical_impact
+        if not data.get("highlight_line"):
+            data["highlight_line"] = self.line
+        if not data.get("language_label"):
+            data["language_label"] = self.language
         return data
 
 

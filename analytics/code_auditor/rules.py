@@ -6,7 +6,10 @@ import re
 from typing import Iterable
 
 from analytics.code_auditor.models import RULE_CATALOG, CodeUnit, Finding
-from analytics.code_auditor.snippets import attach_snippet_fields, default_try_finally_remediation
+from analytics.code_auditor.snippets import (
+    attach_snippet_fields,
+    remediation_template,
+)
 
 RE_CHAINED_CREATE = re.compile(
     r"""(?P<ev>(?:session|Session|notesSession|NotesSession|uiDoc|uidoc)\s*\.\s*
@@ -134,13 +137,15 @@ def _finding(
 ) -> Finding:
     meta = RULE_CATALOG[rule_id]
     warning = handle_lifecycle_warning or impact
-    rem = remediation.strip() or default_try_finally_remediation(unit.language)
+    # Always emit language-aware TO-BE (ignore hardcoded Java samples for LotusScript, etc.)
+    rem = remediation_template(rule_id, unit.language)
     snippet_fields = attach_snippet_fields(
         unit=unit,
         focus_line=line,
         evidence=evidence,
         remediation=rem,
         handle_lifecycle_warning=warning,
+        rule_id=rule_id,
     )
     return Finding(
         id="",  # assigned later
@@ -511,7 +516,7 @@ def detect_dom010(unit: CodeUnit) -> list[Finding]:
                 "Native Domino object creation without try/finally recycle scaffolding leaves C-API handles "
                 "orphaned when exceptions occur mid-method, exhausting the Notes thread handle table."
             ),
-            remediation=default_try_finally_remediation(unit.language),
+            remediation=remediation_template("DOM-010", unit.language),
             action="Wrap Domino object creation in try/finally and recycle every allocated handle.",
             handle_lifecycle_warning=(
                 f"Line {line}: Native object `{var}` initialized without guaranteed recycle() in a finally block."
