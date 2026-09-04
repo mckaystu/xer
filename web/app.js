@@ -118,6 +118,8 @@ const fitBtn = document.getElementById("fitBtn");
 const graphPanel = document.getElementById("graphPanel");
 const overviewPanel = document.getElementById("overviewPanel");
 const overviewContent = document.getElementById("overviewContent");
+const codeAnalysisPanel = document.getElementById("codeAnalysisPanel");
+const codeAnalysisContent = document.getElementById("codeAnalysisContent");
 const rulesPanel = document.getElementById("rulesPanel");
 const rulesContent = document.getElementById("rulesContent");
 const rulesSearch = document.getElementById("rulesSearch");
@@ -729,21 +731,21 @@ function renderRulesCatalog() {
 
 function renderCodeAuditCard(audit) {
   if (!audit) {
-    return `<section class="overview-section"><h2>Code Quality Audit</h2><p class="placeholder">Audit not available.</p></section>`;
+    return `<section class="overview-section"><h2>Code Quality Review</h2><p class="placeholder">Audit not available for this graph.</p></section>`;
   }
   const counts = audit.severity_counts || {};
   const risk = audit.handle_exhaustion_risk || "LOW";
   const riskClass =
     risk === "CRITICAL" || risk === "HIGH" ? "risk-high" : risk === "MEDIUM" ? "risk-moderate" : "risk-low";
   const findings = audit.findings || [];
-  const preview = findings.slice(0, 20);
-  const rows = preview
+  const rows = findings
     .map(
       (f, idx) =>
         `<tr class="audit-row" data-finding-idx="${idx}" role="button" tabindex="0">
           <td><code>${escapeHtml(f.finding_id || f.id)}</code></td>
           <td><span class="sev-pill sev-${escapeHtml(f.severity)}">${escapeHtml(f.severity)}</span></td>
           <td><code>${escapeHtml(f.rule_id)}</code> ${escapeHtml(f.issue || f.title)}</td>
+          <td>${escapeHtml(f.language_label || f.language || "")}</td>
           <td>${escapeHtml(f.location || `${f.element_type}:${f.element_name} L${f.line}`)}</td>
           <td>${typeof f.confidence === "number" && f.confidence <= 1 ? Math.round(f.confidence * 100) : f.confidence}%</td>
         </tr>`
@@ -752,7 +754,7 @@ function renderCodeAuditCard(audit) {
 
   return `
     <section class="overview-section score-section" id="codeAuditSection">
-      <h2>Code Quality Audit</h2>
+      <h2>Handle &amp; Memory Findings</h2>
       <div class="score-card ${riskClass}">
         <div class="score-copy" style="margin-bottom:12px">
           <p class="score-rating">Handle Exhaustion Risk: ${escapeHtml(risk)}</p>
@@ -760,17 +762,57 @@ function renderCodeAuditCard(audit) {
             C:${counts.CRITICAL || 0} H:${counts.HIGH || 0} M:${counts.MEDIUM || 0} L:${counts.LOW || 0}
             · scanned ${audit.blocks_prefiltered || 0}/${audit.blocks_scanned || 0} code blocks
             · ${audit.llm_enabled ? "LLM on" : "rules-only"}
-            · click a row for deep-dive</p>
+            · click a row for As-Is / To-Be deep-dive</p>
         </div>
         ${
           rows
-            ? `<table class="overview-table audit-table"><thead><tr><th>ID</th><th>Sev</th><th>Issue</th><th>Location</th><th>Conf</th></tr></thead><tbody>${rows}</tbody></table>`
+            ? `<table class="overview-table audit-table"><thead><tr><th>ID</th><th>Sev</th><th>Issue</th><th>Lang</th><th>Location</th><th>Conf</th></tr></thead><tbody>${rows}</tbody></table>`
             : `<p class="placeholder">No handle-leak / memory anti-patterns detected in stored script blocks.</p>`
         }
         <div id="auditDeepDive" class="audit-deep-dive hidden"></div>
       </div>
     </section>
   `;
+}
+
+function renderCodeAuditTeaser(audit) {
+  if (!audit) {
+    return `<section class="overview-section"><h2>Code Quality</h2><p class="placeholder">No code audit yet.</p></section>`;
+  }
+  const counts = audit.severity_counts || {};
+  const risk = audit.handle_exhaustion_risk || "LOW";
+  const riskClass =
+    risk === "CRITICAL" || risk === "HIGH" ? "risk-high" : risk === "MEDIUM" ? "risk-moderate" : "risk-low";
+  const n = audit.findings?.length || 0;
+  return `
+    <section class="overview-section score-section">
+      <h2>Code Quality (summary)</h2>
+      <div class="score-card ${riskClass}">
+        <div class="score-copy">
+          <p class="score-rating">Handle Exhaustion Risk: ${escapeHtml(risk)}</p>
+          <p class="score-hint">${n} findings · C:${counts.CRITICAL || 0} H:${counts.HIGH || 0} M:${counts.MEDIUM || 0} L:${counts.LOW || 0}</p>
+          <p class="overview-sub"><a href="#" id="openCodeTab">Open Code Analysis for deep-dive review →</a></p>
+        </div>
+      </div>
+    </section>
+  `;
+}
+
+function renderCodeAnalysis() {
+  if (!codeAnalysisContent) return;
+  if (!currentCodeAudit) {
+    codeAnalysisContent.innerHTML = `<div class="overview-header"><h2>Code Analysis</h2><p class="overview-sub">Static review of Domino handle leaks, recycle anti-patterns, and remediation templates.</p></div><p class="placeholder">Loading code quality audit…</p>`;
+    if (graphSelect.value) loadSummary(graphSelect.value);
+    return;
+  }
+  codeAnalysisContent.innerHTML = `
+    <div class="overview-header">
+      <h2>Code Analysis</h2>
+      <p class="overview-sub">C-API handle lifecycle, ODA conflicts, and memory anti-patterns — click a finding for As-Is / To-Be remediation.</p>
+    </div>
+    ${renderCodeAuditCard(currentCodeAudit)}
+  `;
+  wireCodeAuditDeepDive();
 }
 
 function renderAsIsSnippet(finding) {
@@ -886,7 +928,7 @@ function renderOverview(summary) {
   const lifecycles = summary.document_lifecycles || [];
   const dbs = summary.databases || [];
   const scoreCard = renderModernizationCard(currentAnalysis?.modernization_score);
-  const auditCard = renderCodeAuditCard(currentCodeAudit);
+  const codeTeaser = renderCodeAuditTeaser(currentCodeAudit);
 
   const dbHtml = dbs.length
     ? `<section class="overview-section"><h2>Databases (${dbs.length})</h2><ul class="overview-list">${dbs
@@ -947,13 +989,14 @@ function renderOverview(summary) {
 
   overviewContent.innerHTML = `
     <div class="overview-header">
-      <h2>Application Analysis</h2>
+      <h2>Executive Overview</h2>
+      <p class="overview-sub">High-level application posture — modernization readiness, capabilities, and flow. Use <strong>Code Analysis</strong> for handle-leak deep-dives.</p>
       <p class="overview-sub">${summary.meta?.totals?.business_logic_blocks || 0} logic blocks · ${summary.meta?.totals?.edges || 0} dependency edges</p>
       ${catalogHint}
       <div class="edge-pills">${edgeSummary}</div>
     </div>
     ${scoreCard}
-    ${auditCard}
+    ${codeTeaser}
     ${dbHtml}
     <section class="overview-section">
       <h2>Business Capabilities</h2>
@@ -982,7 +1025,10 @@ function renderOverview(summary) {
     e.preventDefault();
     setActiveView("rules");
   });
-  wireCodeAuditDeepDive();
+  document.getElementById("openCodeTab")?.addEventListener("click", (e) => {
+    e.preventDefault();
+    setActiveView("code");
+  });
 }
 
 async function loadSummary(graphId) {
@@ -997,6 +1043,7 @@ async function loadSummary(graphId) {
     currentAnalysis = analysis;
     currentCodeAudit = codeAudit;
     if (activeView === "overview") renderOverview(currentSummary);
+    if (activeView === "code") renderCodeAnalysis();
     if (activeView === "rules") renderRulesCatalog();
   } catch (err) {
     currentSummary = null;
@@ -1004,6 +1051,9 @@ async function loadSummary(graphId) {
     currentCodeAudit = null;
     if (activeView === "overview") {
       overviewContent.innerHTML = `<p class="error">Could not load analysis: ${err.message}. Restart the API server to pick up the latest code.</p>`;
+    }
+    if (activeView === "code" && codeAnalysisContent) {
+      codeAnalysisContent.innerHTML = `<p class="error">Could not load code audit: ${err.message}</p>`;
     }
     if (activeView === "rules") {
       rulesContent.innerHTML = `<p class="error">Could not load rules: ${err.message}</p>`;
@@ -1026,10 +1076,12 @@ function setActiveView(view) {
   const isMatrix = view === "matrix";
   const isOverview = view === "overview";
   const isRules = view === "rules";
-  const hideGraph = isMatrix || isOverview || isRules;
+  const isCode = view === "code";
+  const hideGraph = isMatrix || isOverview || isRules || isCode;
   graphPanel.classList.toggle("hidden", hideGraph);
   matrixPanel.classList.toggle("hidden", !isMatrix);
   overviewPanel.classList.toggle("hidden", !isOverview);
+  codeAnalysisPanel?.classList.toggle("hidden", !isCode);
   rulesPanel?.classList.toggle("hidden", !isRules);
   legend?.classList.toggle("hidden", hideGraph);
 
@@ -1042,6 +1094,8 @@ function setActiveView(view) {
   if (isOverview) {
     if (currentSummary) renderOverview(currentSummary);
     else if (graphSelect.value) loadSummary(graphSelect.value);
+  } else if (isCode) {
+    renderCodeAnalysis();
   } else if (isRules) {
     if (currentAnalysis) renderRulesCatalog();
     else if (graphSelect.value) loadSummary(graphSelect.value);
@@ -1332,7 +1386,7 @@ async function loadSelectedGraph() {
   syncEdgeFilterForGraph();
   populateFocusSelect();
   loadSummary(id).catch(() => {});
-  if (activeView === "overview" || activeView === "rules") {
+  if (activeView === "overview" || activeView === "rules" || activeView === "code") {
     /* render when summary/analysis returns */
   } else if (activeView === "matrix") {
     buildLookupMatrix();

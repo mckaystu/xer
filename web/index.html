@@ -62,6 +62,7 @@
 
   <nav class="view-tabs" role="tablist">
     <button type="button" class="tab" data-view="overview" role="tab" aria-selected="false">Overview</button>
+    <button type="button" class="tab" data-view="code" role="tab" aria-selected="false">Code Analysis</button>
     <button type="button" class="tab" data-view="rules" role="tab" aria-selected="false">Business Rules</button>
     <button type="button" class="tab active" data-view="focus" role="tab" aria-selected="true">Focus</button>
     <button type="button" class="tab" data-view="matrix" role="tab" aria-selected="false">Lookup Matrix</button>
@@ -72,6 +73,12 @@
     <section class="main-panel overview-panel hidden" id="overviewPanel">
       <div class="overview-scroll" id="overviewContent">
         <p class="placeholder">Loading application analysis…</p>
+      </div>
+    </section>
+
+    <section class="main-panel code-panel hidden" id="codeAnalysisPanel">
+      <div class="overview-scroll" id="codeAnalysisContent">
+        <p class="placeholder">Loading code quality audit…</p>
       </div>
     </section>
 

@@ -1030,7 +1030,7 @@ th { color: var(--muted); font-weight: 500; }
 }
 
 /* Business rules catalog */
-.rules-panel {
+.code-panel {
   display: flex;
   flex-direction: column;
   min-height: 0;
