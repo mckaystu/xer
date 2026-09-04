@@ -52,7 +52,8 @@
         <button id="fitBtn" type="button" title="Fit to view">Fit</button>
       </div>
       <label class="upload-label" title="Upload a .dxl or .xml export for analysis">
-        <input type="file" id="dxlUpload" accept=".dxl,.xml" hidden />
+        <!-- No accept= filter: macOS tags many .dxl exports as Plain Text and greys them out -->
+        <input type="file" id="dxlUpload" hidden />
         Upload DXL
       </label>
       <span id="uploadStatus" class="upload-status"></span>

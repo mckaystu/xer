@@ -1428,13 +1428,25 @@ dxlUpload?.addEventListener("change", async () => {
   const file = dxlUpload.files?.[0];
   if (!file) return;
 
+  const lower = (file.name || "").toLowerCase();
+  if (!lower.endsWith(".dxl") && !lower.endsWith(".xml")) {
+    const msg = "File must be a .dxl or .xml Domino export";
+    uploadStatus.textContent = msg;
+    uploadStatus.className = "upload-status error";
+    showError(msg);
+    dxlUpload.value = "";
+    return;
+  }
+
   const sizeMb = file.size / (1024 * 1024);
   uploadStatus.textContent = `Uploading ${file.name} (${sizeMb.toFixed(2)} MB)…`;
   uploadStatus.className = "upload-status";
 
   // Soft client hint — Vercel body limit is ~4.5 MB including multipart overhead
   if (file.size > 4.4 * 1024 * 1024) {
-    const msg = `File is ${sizeMb.toFixed(2)} MB — too large for cloud upload (~4.5 MB max). Run locally: python3 dxl_parser.py --store-neon`;
+    const msg =
+      `File is ${sizeMb.toFixed(2)} MB — too large for cloud upload (~4.5 MB max). ` +
+      `Ingest locally instead: python3 dxl_parser.py --input "${file.name}" --store-neon`;
     uploadStatus.textContent = msg;
     uploadStatus.className = "upload-status error";
     showError(msg);
