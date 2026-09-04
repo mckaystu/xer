@@ -54,6 +54,26 @@ RULE_CATALOG: dict[str, dict[str, str]] = {
         "category": "High-Memory & Expensive Data Patterns",
         "default_severity": "MEDIUM",
     },
+    "DOM-010": {
+        "title": "Missing Try-Finally Recycling Block",
+        "category": "C-API Handle Leaks & Object Recycling",
+        "default_severity": "HIGH",
+    },
+    "DOM-011": {
+        "title": "Orphaned Child Handle / Early Parent Recycling",
+        "category": "C-API Handle Leaks & Object Recycling",
+        "default_severity": "CRITICAL",
+    },
+    "DOM-012": {
+        "title": "Conditional or Incomplete Loop Recycling",
+        "category": "C-API Handle Leaks & Object Recycling",
+        "default_severity": "HIGH",
+    },
+    "DOM-013": {
+        "title": "Unsafe Object Re-assignment",
+        "category": "C-API Handle Leaks & Object Recycling",
+        "default_severity": "MEDIUM",
+    },
 }
 
 
@@ -93,6 +113,11 @@ class Finding:
     action_required: str
     category: str = ""
     engine: str = "rules"  # rules | llm | hybrid
+    code_snippet_as_is: str = ""
+    code_snippet_to_be: str = ""
+    line_number_start: int = 0
+    line_number_end: int = 0
+    handle_lifecycle_warning: str = ""
 
     def confidence_band(self) -> ConfidenceBand:
         if self.confidence >= 90:
@@ -102,8 +127,22 @@ class Finding:
         return "low"
 
     def to_dict(self) -> dict[str, Any]:
+        """Full finding payload including deep-dive snippet fields."""
         data = asdict(self)
         data["confidence_band"] = self.confidence_band()
+        # API-friendly aliases requested by the deep-dive UI
+        data["finding_id"] = self.id
+        data["issue"] = self.title
+        data["file_path"] = self.source_file
+        data["line_number"] = self.line
+        data["location"] = f"{self.element_type}:{self.element_name} L{self.line}"
+        data["confidence_ratio"] = round(self.confidence / 100.0, 2)
+        if not data.get("code_snippet_to_be"):
+            data["code_snippet_to_be"] = self.remediation
+        if not data.get("code_snippet_as_is"):
+            data["code_snippet_as_is"] = self.evidence
+        if not data.get("handle_lifecycle_warning"):
+            data["handle_lifecycle_warning"] = self.technical_impact
         return data
 
 

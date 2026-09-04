@@ -7,6 +7,7 @@ import os
 from typing import Any
 
 from analytics.code_auditor.models import RULE_CATALOG, CodeUnit, Finding
+from analytics.code_auditor.snippets import attach_snippet_fields, default_try_finally_remediation
 
 SYSTEM_PROMPT = """You are a Domino architecture expert auditing Java, SSJS/XPages, and LotusScript
 for C-API handle leaks, ODA vs lotus.domino conflicts, static handle lifetime bugs, and
@@ -97,6 +98,16 @@ def analyze_unit_with_llm(unit: CodeUnit, *, model: str | None = None) -> list[F
         except (TypeError, ValueError):
             line = unit.start_line
 
+        rem = str(raw.get("remediation") or default_try_finally_remediation(unit.language))
+        evidence = str(raw.get("evidence") or unit.body[:200])
+        impact = str(raw.get("technical_impact") or "Potential Domino handle / memory risk.")
+        snippet_fields = attach_snippet_fields(
+            unit=unit,
+            focus_line=line,
+            evidence=evidence,
+            remediation=rem,
+            handle_lifecycle_warning=impact,
+        )
         findings.append(
             Finding(
                 id="",
@@ -109,12 +120,13 @@ def analyze_unit_with_llm(unit: CodeUnit, *, model: str | None = None) -> list[F
                 element_type=unit.element_type,
                 language=unit.language,
                 line=line,
-                evidence=str(raw.get("evidence") or unit.body[:200]),
-                technical_impact=str(raw.get("technical_impact") or "Potential Domino handle / memory risk."),
-                remediation=str(raw.get("remediation") or "Refactor to recycle safely / avoid static handles."),
+                evidence=evidence,
+                technical_impact=impact,
+                remediation=rem,
                 action_required=str(raw.get("action_required") or "Review and remediate."),
                 category=meta["category"],
                 engine="llm",
+                **snippet_fields,
             )
         )
     return findings

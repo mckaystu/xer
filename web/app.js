@@ -735,39 +735,111 @@ function renderCodeAuditCard(audit) {
   const risk = audit.handle_exhaustion_risk || "LOW";
   const riskClass =
     risk === "CRITICAL" || risk === "HIGH" ? "risk-high" : risk === "MEDIUM" ? "risk-moderate" : "risk-low";
-  const findings = (audit.findings || []).slice(0, 12);
-  const rows = findings
+  const findings = audit.findings || [];
+  const preview = findings.slice(0, 20);
+  const rows = preview
     .map(
-      (f) =>
-        `<tr>
-          <td><code>${escapeHtml(f.id)}</code></td>
+      (f, idx) =>
+        `<tr class="audit-row" data-finding-idx="${idx}" role="button" tabindex="0">
+          <td><code>${escapeHtml(f.finding_id || f.id)}</code></td>
           <td><span class="sev-pill sev-${escapeHtml(f.severity)}">${escapeHtml(f.severity)}</span></td>
-          <td><code>${escapeHtml(f.rule_id)}</code> ${escapeHtml(f.title)}</td>
-          <td>${escapeHtml(f.element_type)}:${escapeHtml(f.element_name)} <span class="muted">L${f.line}</span></td>
-          <td>${f.confidence}%</td>
+          <td><code>${escapeHtml(f.rule_id)}</code> ${escapeHtml(f.issue || f.title)}</td>
+          <td>${escapeHtml(f.location || `${f.element_type}:${f.element_name} L${f.line}`)}</td>
+          <td>${typeof f.confidence === "number" && f.confidence <= 1 ? Math.round(f.confidence * 100) : f.confidence}%</td>
         </tr>`
     )
     .join("");
 
   return `
-    <section class="overview-section score-section">
+    <section class="overview-section score-section" id="codeAuditSection">
       <h2>Code Quality Audit</h2>
       <div class="score-card ${riskClass}">
         <div class="score-copy" style="margin-bottom:12px">
           <p class="score-rating">Handle Exhaustion Risk: ${escapeHtml(risk)}</p>
-          <p class="score-hint">${audit.findings?.length || 0} findings ·
+          <p class="score-hint">${findings.length} findings ·
             C:${counts.CRITICAL || 0} H:${counts.HIGH || 0} M:${counts.MEDIUM || 0} L:${counts.LOW || 0}
             · scanned ${audit.blocks_prefiltered || 0}/${audit.blocks_scanned || 0} code blocks
-            · ${audit.llm_enabled ? "LLM on" : "rules-only"}</p>
+            · ${audit.llm_enabled ? "LLM on" : "rules-only"}
+            · click a row for deep-dive</p>
         </div>
         ${
           rows
-            ? `<table class="overview-table"><thead><tr><th>ID</th><th>Sev</th><th>Issue</th><th>Location</th><th>Conf</th></tr></thead><tbody>${rows}</tbody></table>`
+            ? `<table class="overview-table audit-table"><thead><tr><th>ID</th><th>Sev</th><th>Issue</th><th>Location</th><th>Conf</th></tr></thead><tbody>${rows}</tbody></table>`
             : `<p class="placeholder">No handle-leak / memory anti-patterns detected in stored script blocks.</p>`
         }
+        <div id="auditDeepDive" class="audit-deep-dive hidden"></div>
       </div>
     </section>
   `;
+}
+
+function renderAuditDeepDive(finding) {
+  if (!finding) return "";
+  const conf =
+    typeof finding.confidence === "number" && finding.confidence <= 1
+      ? Math.round(finding.confidence * 100)
+      : finding.confidence;
+  const asIs = finding.code_snippet_as_is || finding.evidence || "";
+  const toBe = finding.code_snippet_to_be || finding.remediation || "";
+  const warning = finding.handle_lifecycle_warning || finding.technical_impact || "";
+  const lineRange =
+    finding.line_number_start && finding.line_number_end
+      ? `L${finding.line_number_start}–${finding.line_number_end}`
+      : `L${finding.line_number || finding.line}`;
+
+  return `
+    <div class="deep-dive-header">
+      <div>
+        <h3>${escapeHtml(finding.finding_id || finding.id)} · [${escapeHtml(finding.rule_id)}] ${escapeHtml(finding.issue || finding.title)}</h3>
+        <p class="score-hint">
+          <span class="sev-pill sev-${escapeHtml(finding.severity)}">${escapeHtml(finding.severity)}</span>
+          · Confidence ${conf}% · ${escapeHtml(finding.location || "")} · ${escapeHtml(lineRange)}
+        </p>
+      </div>
+      <button type="button" class="deep-dive-close" id="auditDeepDiveClose">Close</button>
+    </div>
+    ${warning ? `<p class="lifecycle-warning">${escapeHtml(warning)}</p>` : ""}
+    <div class="diff-grid">
+      <div class="diff-pane">
+        <div class="diff-label as-is">As-Is (vulnerable)</div>
+        <pre class="diff-code">${escapeHtml(asIs)}</pre>
+      </div>
+      <div class="diff-pane">
+        <div class="diff-label to-be">To-Be (safe recycle)</div>
+        <pre class="diff-code">${escapeHtml(toBe)}</pre>
+      </div>
+    </div>
+    <p class="score-hint"><strong>Action:</strong> ${escapeHtml(finding.action_required || "")}</p>
+  `;
+}
+
+function wireCodeAuditDeepDive() {
+  const section = document.getElementById("codeAuditSection");
+  const dive = document.getElementById("auditDeepDive");
+  if (!section || !dive || !currentCodeAudit?.findings?.length) return;
+
+  const openFinding = (idx) => {
+    const finding = currentCodeAudit.findings[idx];
+    if (!finding) return;
+    dive.innerHTML = renderAuditDeepDive(finding);
+    dive.classList.remove("hidden");
+    document.getElementById("auditDeepDiveClose")?.addEventListener("click", () => {
+      dive.classList.add("hidden");
+      dive.innerHTML = "";
+    });
+    dive.scrollIntoView({ behavior: "smooth", block: "nearest" });
+  };
+
+  section.querySelectorAll(".audit-row").forEach((row) => {
+    const handler = () => openFinding(Number(row.dataset.findingIdx));
+    row.addEventListener("click", handler);
+    row.addEventListener("keydown", (e) => {
+      if (e.key === "Enter" || e.key === " ") {
+        e.preventDefault();
+        handler();
+      }
+    });
+  });
 }
 
 function renderOverview(summary) {
@@ -878,6 +950,7 @@ function renderOverview(summary) {
     e.preventDefault();
     setActiveView("rules");
   });
+  wireCodeAuditDeepDive();
 }
 
 async function loadSummary(graphId) {

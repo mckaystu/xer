@@ -6,6 +6,7 @@ import re
 from typing import Iterable
 
 from analytics.code_auditor.models import RULE_CATALOG, CodeUnit, Finding
+from analytics.code_auditor.snippets import attach_snippet_fields, default_try_finally_remediation
 
 RE_CHAINED_CREATE = re.compile(
     r"""(?P<ev>(?:session|Session|notesSession|NotesSession|uiDoc|uidoc)\s*\.\s*
@@ -69,6 +70,42 @@ RE_PASS_LOTUS_HINT = re.compile(
     re.I,
 )
 
+# DOM-010: object creation / acquisition assignments
+RE_OBJECT_CREATE = re.compile(
+    r"""(?P<lhs>\b(?:Database|View|Document|ViewEntry|DocumentCollection|DateTime|Name|
+        NotesDatabase|NotesDocument|NotesView|NotesViewEntry|NotesDateTime)\b
+        \s+(?P<var>\w+)\s*=
+        |(?P<var2>\w+)\s*=\s*(?:\(\s*)?(?:Database|View|Document|Session)
+        |\b(?:Set\s+)?(?P<var3>\w+)\s*=\s*.*\.(?:getDatabase|getView|getFirstDocument|getDocumentByKey|
+            getAllDocumentsByKey|getAllEntries|createDateTime|createName)\s*\()""",
+    re.I | re.X,
+)
+
+# DOM-011: parent.recycle()
+RE_PARENT_RECYCLE = re.compile(
+    r"\b(?P<parent>view|db|database|coll|collection|dc|vec|entries|vw)\s*\.\s*recycle\s*\(\s*\)",
+    re.I,
+)
+RE_CHILD_USE = re.compile(
+    r"\b(?P<child>doc|document|entry|ve|viewEntry|notesDoc)\b(?:\s*\.|\s*=)",
+    re.I,
+)
+
+# DOM-012: recycle inside if within a loop-ish region
+RE_CONDITIONAL_RECYCLE = re.compile(
+    r"""(?:for|while|do)\b[\s\S]{0,400}?
+        \bif\s*\([^)]*\)\s*\{[^}]{0,200}?\.\s*recycle\s*\(\s*\)
+        |\bIf\b[^\n]{0,120}\n[^\n]{0,120}\.(?:recycle|Remove|Delete)\b""",
+    re.I | re.X,
+)
+
+# DOM-013: doc = coll.getNextDocument(doc) without prior recycle of doc
+RE_UNSAFE_REASSIGN = re.compile(
+    r"""(?P<var>\w+)\s*=\s*[\w\.]+\.getNext(?:Document|Entry)\s*\(\s*(?P=var)\s*\)
+        |Set\s+(?P<var2>\w+)\s*=\s*[\w\.]+\.GetNext(?:Document|Entry)\s*\(\s*(?P=var2)\s*\)""",
+    re.I | re.X,
+)
+
 
 def _line_of(body: str, index: int, base: int = 1) -> int:
     return base + body.count("\n", 0, max(0, index))
@@ -93,8 +130,18 @@ def _finding(
     remediation: str,
     action: str,
     engine: str = "rules",
+    handle_lifecycle_warning: str | None = None,
 ) -> Finding:
     meta = RULE_CATALOG[rule_id]
+    warning = handle_lifecycle_warning or impact
+    rem = remediation.strip() or default_try_finally_remediation(unit.language)
+    snippet_fields = attach_snippet_fields(
+        unit=unit,
+        focus_line=line,
+        evidence=evidence,
+        remediation=rem,
+        handle_lifecycle_warning=warning,
+    )
     return Finding(
         id="",  # assigned later
         rule_id=rule_id,
@@ -108,10 +155,11 @@ def _finding(
         line=line,
         evidence=evidence,
         technical_impact=impact,
-        remediation=remediation,
+        remediation=rem,
         action_required=action,
         category=meta["category"],
         engine=engine,
+        **snippet_fields,
     )
 
 
@@ -434,6 +482,185 @@ def detect_dom009(unit: CodeUnit) -> list[Finding]:
     return findings
 
 
+def detect_dom010(unit: CodeUnit) -> list[Finding]:
+    """Object creation/acquisition without surrounding try/finally recycle scaffolding."""
+    # try/finally recycle is a Java/SSJS idiom; LotusScript is covered by DOM-002/013 + Delete.
+    if unit.language not in {"java", "javascript", "ssjs", "jscript"}:
+        return []
+
+    match = RE_OBJECT_CREATE.search(unit.body)
+    if not match:
+        return []
+
+    has_try = bool(RE_TRY.search(unit.body))
+    has_finally = bool(RE_FINALLY.search(unit.body))
+    has_recycle = bool(RE_RECYCLE.search(unit.body))
+    if has_try and has_finally and has_recycle:
+        return []
+
+    var = match.groupdict().get("var") or match.groupdict().get("var2") or match.groupdict().get("var3") or "handle"
+    line = _line_of(unit.body, match.start(), unit.start_line)
+    return [
+        _finding(
+            "DOM-010",
+            unit,
+            line=line,
+            evidence=_snippet(unit.body, match.start()),
+            confidence=88,
+            impact=(
+                "Native Domino object creation without try/finally recycle scaffolding leaves C-API handles "
+                "orphaned when exceptions occur mid-method, exhausting the Notes thread handle table."
+            ),
+            remediation=default_try_finally_remediation(unit.language),
+            action="Wrap Domino object creation in try/finally and recycle every allocated handle.",
+            handle_lifecycle_warning=(
+                f"Line {line}: Native object `{var}` initialized without guaranteed recycle() in a finally block."
+            ),
+        )
+    ]
+
+
+def detect_dom011(unit: CodeUnit) -> list[Finding]:
+    """Parent recycled while child handles may still be live."""
+    findings: list[Finding] = []
+    for match in RE_PARENT_RECYCLE.finditer(unit.body):
+        parent = match.group("parent")
+        after = unit.body[match.end() : match.end() + 400]
+        child_match = RE_CHILD_USE.search(after)
+        # Also look slightly before for child acquisition from this parent
+        before = unit.body[max(0, match.start() - 500) : match.start()]
+        acquired_child = bool(
+            re.search(
+                rf"\b(?:doc|entry|document)\b[^\n]{{0,80}}{re.escape(parent)}\s*\.\s*get",
+                before,
+                re.I,
+            )
+            or re.search(
+                rf"{re.escape(parent)}\s*\.\s*get(?:First|Next)?(?:Document|Entry)",
+                before,
+                re.I,
+            )
+        )
+        if not (child_match or acquired_child):
+            continue
+        line = _line_of(unit.body, match.start(), unit.start_line)
+        findings.append(
+            _finding(
+                "DOM-011",
+                unit,
+                line=line,
+                evidence=_snippet(unit.body, match.start(), 260),
+                confidence=91,
+                impact=(
+                    "Recycling a parent View/Database/Collection while child Document/ViewEntry handles are still "
+                    "referenced orphans those children in the C-API — subsequent use can crash the HTTP thread "
+                    "or silently corrupt memory."
+                ),
+                remediation=(
+                    "// Recycle children first, parent last\n"
+                    "Document doc = view.getFirstDocument();\n"
+                    "while (doc != null) {\n"
+                    "  Document next = view.getNextDocument(doc);\n"
+                    "  try { /* work */ } finally { doc.recycle(); }\n"
+                    "  doc = next;\n"
+                    "}\n"
+                    "view.recycle();  // only after all children are gone\n"
+                    "db.recycle();"
+                ),
+                action="Recycle child Document/ViewEntry handles before recycling the parent View/Database.",
+                handle_lifecycle_warning=(
+                    f"Line {line}: Parent `{parent}` recycled while child Document/ViewEntry handles may remain active."
+                ),
+            )
+        )
+    return findings
+
+
+def detect_dom012(unit: CodeUnit) -> list[Finding]:
+    """Recycle only on some loop branches — other paths leak."""
+    if not RE_LOOP.search(unit.body):
+        return []
+    match = RE_CONDITIONAL_RECYCLE.search(unit.body)
+    if not match:
+        # Secondary heuristic: recycle appears inside if but getNext exists
+        if RE_GET_NEXT.search(unit.body) and re.search(
+            r"if\s*\([^\)]*\)\s*\{[^}]*\.recycle\s*\(", unit.body, re.I | re.S
+        ):
+            match = re.search(r"if\s*\([^\)]*\)\s*\{[^}]*\.recycle\s*\(", unit.body, re.I | re.S)
+        else:
+            return []
+    assert match is not None
+    line = _line_of(unit.body, match.start(), unit.start_line)
+    return [
+        _finding(
+            "DOM-012",
+            unit,
+            line=line,
+            evidence=_snippet(unit.body, match.start(), 280),
+            confidence=85,
+            impact=(
+                "When .recycle() is guarded by an if inside a collection loop, failure/skip paths leave "
+                "Document/ViewEntry handles open — a classic intermittent handle leak under real data."
+            ),
+            remediation=(
+                "Document doc = coll.getFirstDocument();\n"
+                "while (doc != null) {\n"
+                "  Document next = coll.getNextDocument(doc);\n"
+                "  try {\n"
+                "    if (shouldProcess(doc)) {\n"
+                "      // work\n"
+                "    }\n"
+                "  } finally {\n"
+                "    doc.recycle(); // ALWAYS — outside the business if\n"
+                "  }\n"
+                "  doc = next;\n"
+                "}"
+            ),
+            action="Move .recycle() into a finally block that runs on every loop iteration.",
+            handle_lifecycle_warning=(
+                f"Line {line}: .recycle() appears inside a conditional — some loop paths leave handles open."
+            ),
+        )
+    ]
+
+
+def detect_dom013(unit: CodeUnit) -> list[Finding]:
+    """Re-assign loop variable via getNext*(sameVar) without recycling first."""
+    findings: list[Finding] = []
+    for match in RE_UNSAFE_REASSIGN.finditer(unit.body):
+        var = match.group("var") or match.group("var2") or "doc"
+        # If recycle of that var appears in the 120 chars before assignment, treat as safer
+        prelude = unit.body[max(0, match.start() - 160) : match.start()]
+        if re.search(rf"\b{re.escape(var)}\s*\.\s*recycle\s*\(", prelude, re.I):
+            continue
+        if re.search(rf"\bDelete\s+{re.escape(var)}\b", prelude, re.I):
+            continue
+        line = _line_of(unit.body, match.start(), unit.start_line)
+        findings.append(
+            _finding(
+                "DOM-013",
+                unit,
+                line=line,
+                evidence=_snippet(unit.body, match.start()),
+                confidence=90,
+                impact=(
+                    f"Re-assigning `{var} = …getNextDocument({var})` drops the only reference to the previous "
+                    "handle without recycle(), leaking one C-API object per iteration."
+                ),
+                remediation=(
+                    f"Document next = collection.getNextDocument({var});\n"
+                    f"{var}.recycle();\n"
+                    f"{var} = next;"
+                ),
+                action=f"Capture next handle in a temp, recycle `{var}`, then reassign.",
+                handle_lifecycle_warning=(
+                    f"Line {line}: `{var}` re-assigned from getNext* without recycling the previous handle."
+                ),
+            )
+        )
+    return findings
+
+
 DETECTORS = [
     detect_dom001,
     detect_dom002,
@@ -444,6 +671,10 @@ DETECTORS = [
     detect_dom007,
     detect_dom008,
     detect_dom009,
+    detect_dom010,
+    detect_dom011,
+    detect_dom012,
+    detect_dom013,
 ]
 
 

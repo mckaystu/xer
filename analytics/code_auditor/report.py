@@ -68,8 +68,15 @@ def render_markdown(report: AuditReport) -> str:
         lines.append("#### Code Evidence (As Is)")
         lines.append("")
         lines.append("```")
-        lines.append(f.evidence.rstrip())
+        lines.append((f.code_snippet_as_is or f.evidence).rstrip())
         lines.append("```")
+        lines.append("")
+        if f.handle_lifecycle_warning:
+            lines.append(f"**Handle Lifecycle Warning:** {f.handle_lifecycle_warning}")
+            lines.append("")
+        lines.append(
+            f"**Snippet Lines:** {f.line_number_start or f.line}–{f.line_number_end or f.line}"
+        )
         lines.append("")
         lines.append("#### Technical Impact")
         lines.append("")
@@ -78,7 +85,7 @@ def render_markdown(report: AuditReport) -> str:
         lines.append("#### Remediation Code (To Be)")
         lines.append("")
         lines.append("```")
-        lines.append(f.remediation.rstrip())
+        lines.append((f.code_snippet_to_be or f.remediation).rstrip())
         lines.append("```")
         lines.append("")
         lines.append(f"**Action Required:** {f.action_required}")
