@@ -85,6 +85,50 @@ PROBLEM_BREAKDOWNS: dict[str, str] = {
         "AI control-flow analysis found a Domino handle allocation path that static regex rules "
         "missed — typically nested branches, exception paths, or non-standard cleanup gaps."
     ),
+    "DOM-014": (
+        "An Item, MIMEEntity, or RichTextItem handle is acquired (getFirstItem / getMIMEEntity / "
+        "createRichTextItem) without a matching recycle/Delete — native C-API memory leaks."
+    ),
+    "LS-DOM-005": (
+        "LotusScript GetFirstItem / GetMIMEEntity / CreateRichTextItem assigns a handle without Delete."
+    ),
+    "DOM-015": (
+        "A ViewNavigator or ViewEntryCollection is created without recycle — NIF locks and handles linger."
+    ),
+    "LS-DOM-006": (
+        "NotesViewNavigator / NotesViewEntryCollection created without Delete — index locks persist."
+    ),
+    "LS-DOM-007": (
+        "On Error GoTo handler exits without Delete of Notes* temps allocated on the main path."
+    ),
+    "DOM-016": (
+        "db.search / FTSearch inside a loop returns a collection that is never recycled."
+    ),
+    "LS-DOM-008": (
+        "Search / FTSearch inside a LotusScript loop without Delete of the returned collection."
+    ),
+    "PERF-001": (
+        "A view write/iteration loop runs without view.AutoUpdate = False, forcing NIF rebuilds "
+        "on every document change."
+    ),
+    "PERF-002": (
+        "db.getView / GetView is called inside a loop instead of hoisting the view handle outside."
+    ),
+    "PERF-003": (
+        "doc.save / doc.Save runs on every collection iteration without batching — high I/O and log bloat."
+    ),
+    "DOM-BS-002": (
+        "AI cross-module analysis found a Document/NotesDocument passed or returned across functions "
+        "where neither caller nor callee clearly owns recycle/Delete."
+    ),
+    "SEC-001": (
+        "A password or secret is hardcoded in source and used with an http:// endpoint, exposing "
+        "credentials in cleartext."
+    ),
+    "SEC-002": (
+        "GetDocumentByUNID is driven by URL/query input without an evident authorization check, "
+        "allowing UNID enumeration / unauthorized document access."
+    ),
 }
 
 REMEDIATION_GUIDES: dict[str, dict[str, str]] = {
@@ -153,6 +197,54 @@ REMEDIATION_GUIDES: dict[str, dict[str, str]] = {
             "including early returns and catch blocks."
         ),
     },
+    "DOM-014": {
+        "lotusscript": "After GetFirstItem/GetMIMEEntity/CreateRichTextItem, `Delete` the item/MIME object.",
+        "java": "Recycle Item/MIMEEntity/RichTextItem in finally after use.",
+    },
+    "LS-DOM-005": {
+        "lotusscript": "Delete Item/MIME/RichText handles after use, especially inside loops.",
+    },
+    "DOM-015": {
+        "lotusscript": "Delete ViewEntry children then Delete the ViewNavigator / ViewEntryCollection.",
+        "java": "Recycle entries then navigator/collection.recycle() after the loop.",
+    },
+    "LS-DOM-006": {
+        "lotusscript": "Delete NotesViewNavigator / NotesViewEntryCollection after iteration.",
+    },
+    "LS-DOM-007": {
+        "lotusscript": "In the On Error handler, Delete temporary Notes* objects before Exit Sub / Resume.",
+    },
+    "DOM-016": {
+        "lotusscript": "Delete the DocumentCollection from Search/FTSearch before the next iteration.",
+        "java": "collection.recycle() after processing each in-loop search result.",
+    },
+    "LS-DOM-008": {
+        "lotusscript": "Delete the Search/FTSearch collection before continuing the outer loop.",
+    },
+    "PERF-001": {
+        "lotusscript": "Set view.AutoUpdate = False before the write loop; restore True afterward if needed.",
+        "java": "view.setAutoUpdate(false) before the loop; restore true after.",
+    },
+    "PERF-002": {
+        "lotusscript": "Call GetView once before the loop; reuse the NotesView handle inside.",
+        "java": "Hoist db.getView(...) above the loop; recycle once after.",
+    },
+    "PERF-003": {
+        "lotusscript": "Avoid Save on every iteration when possible; batch updates or checkpoint periodically.",
+        "java": "Avoid doc.save() every iteration; batch or throttle writes.",
+    },
+    "DOM-BS-002": {
+        "lotusscript": "Document ownership: either callee Deletes before return, or caller Deletes after use — never neither.",
+        "java": "Clarify ownership: recycle in callee before return, or in caller after use — never neither.",
+    },
+    "SEC-001": {
+        "lotusscript": "Store credentials outside source (env/secret store); call https:// endpoints only.",
+        "java": "Load secrets from configuration/vault; use HTTPS URLs only.",
+    },
+    "SEC-002": {
+        "lotusscript": "Before GetDocumentByUNID from query input, verify the user may open that document (ACL/role).",
+        "java": "Authorize the UNID from request parameters before getDocumentByUNID.",
+    },
 }
 
 
@@ -180,10 +272,156 @@ def is_java_like(language: str | None) -> bool:
     return normalize_language(language) in {"java", "javascript"}
 
 
-def remediation_template(rule_id: str, language: str | None) -> str:
-    """Return a language-appropriate TO-BE code template for the rule."""
+def remediation_template(
+    rule_id: str,
+    language: str | None,
+    *,
+    has_loop: bool | None = None,
+) -> str:
+    """Return a language-appropriate TO-BE code template for the rule.
+
+    When ``has_loop`` is False, prefer linear Delete / try-finally templates
+    instead of GetNextDocument loop-advancement patterns.
+    """
     lang = normalize_language(language)
     ls = lang == "lotusscript"
+    looped = True if has_loop is None else bool(has_loop)
+
+    # Non-loop linear templates (one-shot helpers like EncodeBase64)
+    linear_ls: dict[str, str] = {
+        "DOM-002": (
+            "Dim doc As NotesDocument\n"
+            "Set doc = db.GetDocumentByUNID(unid$)\n"
+            "' ... one-shot work ...\n"
+            "If Not doc Is Nothing Then Delete doc"
+        ),
+        "DOM-003": (
+            "Dim doc As NotesDocument\n"
+            "Set doc = db.CreateDocument\n"
+            "' ... work ...\n"
+            "If Not doc Is Nothing Then Delete doc"
+        ),
+        "DOM-010": (
+            "Dim doc As NotesDocument\n"
+            "Dim mime As NotesMIMEEntity\n"
+            "Set doc = db.CreateDocument\n"
+            "Set mime = doc.CreateMIMEEntity\n"
+            "' ... work ...\n"
+            "If Not mime Is Nothing Then Delete mime\n"
+            "If Not doc Is Nothing Then Delete doc"
+        ),
+        "DOM-011": (
+            "Dim doc As NotesDocument\n"
+            "Set doc = view.GetFirstDocument()\n"
+            "' ... one-shot work ...\n"
+            "If Not doc Is Nothing Then Delete doc\n"
+            "' Delete view only if this routine opened it"
+        ),
+        "DOM-013": (
+            "Dim doc As NotesDocument\n"
+            "Set doc = db.GetDocumentByUNID(unid$)\n"
+            "' ... work ...\n"
+            "If Not doc Is Nothing Then Delete doc"
+        ),
+        "LS-DOM-001": (
+            "Dim doc As NotesDocument\n"
+            "Set doc = db.GetDocumentByUNID(unid$)\n"
+            "' One-shot helper — no loop advance required\n"
+            "If Not doc Is Nothing Then Delete doc"
+        ),
+        "LS-DOM-002": (
+            "Dim lookupDoc As NotesDocument\n"
+            "Set lookupDoc = db.GetDocumentByUNID(unid$)\n"
+            "' ... work ...\n"
+            "If Not lookupDoc Is Nothing Then Delete lookupDoc"
+        ),
+        "LS-DOM-004": (
+            "' EncodeBase64-style one-shot helper — Delete then optional Nothing\n"
+            "Dim doc As NotesDocument\n"
+            "Dim body As NotesMIMEEntity\n"
+            "Set doc = db.CreateDocument\n"
+            "Set body = doc.CreateMIMEEntity\n"
+            "' ... encode ...\n"
+            "If Not body Is Nothing Then Delete body\n"
+            "If Not doc Is Nothing Then Delete doc\n"
+            "Set doc = Nothing"
+        ),
+        "LS-DOM-005": (
+            "Dim body As NotesMIMEEntity\n"
+            "Set body = doc.CreateMIMEEntity\n"
+            "' ... use MIME ...\n"
+            "If Not body Is Nothing Then Delete body\n"
+            "If Not doc Is Nothing Then Delete doc"
+        ),
+        "DOM-014": (
+            "Dim body As NotesMIMEEntity\n"
+            "Set body = doc.CreateMIMEEntity\n"
+            "' ... work ...\n"
+            "If Not body Is Nothing Then Delete body"
+        ),
+        "DOM-BS-001": (
+            "Dim doc As NotesDocument\n"
+            "Set doc = db.CreateDocument\n"
+            "' ... one-shot work ...\n"
+            "If Not doc Is Nothing Then Delete doc"
+        ),
+    }
+    linear_java: dict[str, str] = {
+        "DOM-002": (
+            "Document doc = null;\n"
+            "try {\n"
+            "  doc = db.getDocumentByUNID(unid);\n"
+            "  // ... one-shot work ...\n"
+            "} finally {\n"
+            "  if (doc != null) doc.recycle();\n"
+            "}"
+        ),
+        "DOM-003": (
+            "Document doc = null;\n"
+            "try {\n"
+            "  doc = db.createDocument();\n"
+            "  // ... work ...\n"
+            "} finally {\n"
+            "  if (doc != null) doc.recycle();\n"
+            "}"
+        ),
+        "DOM-010": (
+            "Document doc = null;\n"
+            "MIMEEntity mime = null;\n"
+            "try {\n"
+            "  doc = db.createDocument();\n"
+            "  mime = doc.createMIMEEntity();\n"
+            "  // ... work ...\n"
+            "} finally {\n"
+            "  if (mime != null) mime.recycle();\n"
+            "  if (doc != null) doc.recycle();\n"
+            "}"
+        ),
+        "DOM-014": (
+            "MIMEEntity entity = null;\n"
+            "try {\n"
+            "  entity = doc.getMIMEEntity();\n"
+            "  // ... work ...\n"
+            "} finally {\n"
+            "  if (entity != null) entity.recycle();\n"
+            "}"
+        ),
+        "DOM-BS-001": (
+            "Document doc = null;\n"
+            "try {\n"
+            "  doc = db.createDocument();\n"
+            "  // ... work ...\n"
+            "} finally {\n"
+            "  if (doc != null) doc.recycle();\n"
+            "}"
+        ),
+    }
+
+    if not looped:
+        if ls and rule_id in linear_ls:
+            return linear_ls[rule_id]
+        if not ls and rule_id in linear_java:
+            return linear_java[rule_id]
 
     templates_ls: dict[str, str] = {
         "DOM-001": (
@@ -352,6 +590,107 @@ def remediation_template(rule_id: str, language: str | None) -> str:
             "    If Not doc Is Nothing Then Delete doc\n"
             "    Resume Next"
         ),
+        "LS-DOM-005": (
+            "Dim item As NotesItem\n"
+            "Set item = doc.GetFirstItem(\"Body\")\n"
+            "' ... use item ...\n"
+            "If Not item Is Nothing Then Delete item"
+        ),
+        "LS-DOM-006": (
+            "Dim nav As NotesViewNavigator\n"
+            "Dim entry As NotesViewEntry\n"
+            "Set nav = view.CreateViewNav()\n"
+            "Set entry = nav.GetFirst()\n"
+            "Do While Not entry Is Nothing\n"
+            "    Dim nextEntry As NotesViewEntry\n"
+            "    Set nextEntry = nav.GetNext(entry)\n"
+            "    Delete entry\n"
+            "    Set entry = nextEntry\n"
+            "Loop\n"
+            "Delete nav"
+        ),
+        "LS-DOM-007": (
+            "On Error GoTo Fail\n"
+            "Dim doc As NotesDocument\n"
+            "Set doc = db.GetDocumentByUNID(unid$)\n"
+            "' ... work ...\n"
+            "Delete doc\n"
+            "Exit Sub\n"
+            "Fail:\n"
+            "    If Not doc Is Nothing Then Delete doc\n"
+            "    Exit Sub"
+        ),
+        "LS-DOM-008": (
+            "Do While Not outer Is Nothing\n"
+            "    Dim coll As NotesDocumentCollection\n"
+            "    Set coll = db.Search({Form = \"Memo\"}, Nothing, 0)\n"
+            "    ' ... process coll ...\n"
+            "    Delete coll\n"
+            "    Set outer = view.GetNextDocument(outer)\n"
+            "Loop"
+        ),
+        "PERF-001": (
+            "view.AutoUpdate = False\n"
+            "Set doc = view.GetFirstDocument()\n"
+            "Do While Not doc Is Nothing\n"
+            "    ' ... modify / save ...\n"
+            "    Set doc = view.GetNextDocument(doc)\n"
+            "Loop\n"
+            "view.AutoUpdate = True"
+        ),
+        "PERF-002": (
+            "Dim view As NotesView\n"
+            "Set view = db.GetView(\"All\")   ' hoist outside loop\n"
+            "Do While Not doc Is Nothing\n"
+            "    ' use view — do not GetView again here\n"
+            "    Set doc = view.GetNextDocument(doc)\n"
+            "Loop\n"
+            "Delete view"
+        ),
+        "PERF-003": (
+            "' Prefer fewer Saves — e.g. update in memory then Save selectively\n"
+            "Do While Not doc Is Nothing\n"
+            "    Call doc.ReplaceItemValue(\"Flag\", \"1\")\n"
+            "    ' Call doc.Save(True, False) only when required, or checkpoint every N docs\n"
+            "    Set doc = coll.GetNextDocument(doc)\n"
+            "Loop"
+        ),
+        "DOM-014": (
+            "Dim item As NotesItem\n"
+            "Set item = doc.GetFirstItem(\"Subject\")\n"
+            "If Not item Is Nothing Then Delete item"
+        ),
+        "DOM-015": (
+            "Dim nav As NotesViewNavigator\n"
+            "Set nav = view.CreateViewNav()\n"
+            "' ... iterate entries with Delete each ...\n"
+            "Delete nav"
+        ),
+        "DOM-016": (
+            "Dim coll As NotesDocumentCollection\n"
+            "Set coll = db.FTSearch(query$, 0)\n"
+            "' ... process ...\n"
+            "Delete coll"
+        ),
+        "SEC-001": (
+            "' Do not hardcode passwords; load from secure config\n"
+            "Dim password As String\n"
+            "password = GetSecureSecret(\"bossrest.password\")\n"
+            "url$ = \"https://secure.example.com/api\"   ' never http:// for credentials"
+        ),
+        "SEC-002": (
+            "unid$ = GetQueryParameter(\"unid\")\n"
+            "If Not UserMayOpenDocument(unid$) Then\n"
+            "    Error 401, \"Unauthorized\"\n"
+            "End If\n"
+            "Set doc = db.GetDocumentByUNID(unid$)"
+        ),
+        "DOM-BS-002": (
+            "' Callee returns doc — caller owns Delete\n"
+            "Set doc = FetchDoc(unid$)\n"
+            "' ... work ...\n"
+            "If Not doc Is Nothing Then Delete doc"
+        ),
     }
 
     templates_java: dict[str, str] = {
@@ -484,6 +823,89 @@ def remediation_template(rule_id: str, language: str | None) -> str:
             "  if (doc != null) doc.recycle(); // every exit path\n"
             "}"
         ),
+        "DOM-014": (
+            "Item item = null;\n"
+            "try {\n"
+            "  item = doc.getFirstItem(\"Subject\");\n"
+            "  // ...\n"
+            "} finally {\n"
+            "  if (item != null) item.recycle();\n"
+            "}"
+        ),
+        "DOM-015": (
+            "ViewNavigator nav = null;\n"
+            "try {\n"
+            "  nav = view.createViewNav();\n"
+            "  // iterate + recycle entries\n"
+            "} finally {\n"
+            "  if (nav != null) nav.recycle();\n"
+            "}"
+        ),
+        "DOM-016": (
+            "DocumentCollection coll = null;\n"
+            "try {\n"
+            "  coll = db.FTSearch(query, 0);\n"
+            "  // process\n"
+            "} finally {\n"
+            "  if (coll != null) coll.recycle();\n"
+            "}"
+        ),
+        "PERF-001": (
+            "view.setAutoUpdate(false);\n"
+            "try {\n"
+            "  Document doc = view.getFirstDocument();\n"
+            "  while (doc != null) {\n"
+            "    Document next = view.getNextDocument(doc);\n"
+            "    try { /* modify */ } finally { doc.recycle(); }\n"
+            "    doc = next;\n"
+            "  }\n"
+            "} finally {\n"
+            "  view.setAutoUpdate(true);\n"
+            "}"
+        ),
+        "PERF-002": (
+            "View view = db.getView(\"All\"); // hoist outside loop\n"
+            "try {\n"
+            "  for (...) {\n"
+            "    // reuse view — do not getView again\n"
+            "  }\n"
+            "} finally {\n"
+            "  if (view != null) view.recycle();\n"
+            "}"
+        ),
+        "PERF-003": (
+            "// Avoid save() every iteration — batch or checkpoint\n"
+            "int n = 0;\n"
+            "while (doc != null) {\n"
+            "  // mutate\n"
+            "  if (++n % 50 == 0) doc.save(true, false); // example throttle\n"
+            "  Document next = coll.getNextDocument(doc);\n"
+            "  doc.recycle();\n"
+            "  doc = next;\n"
+            "}"
+        ),
+        "SEC-001": (
+            "// Load secrets from vault/config — never hardcode; use HTTPS\n"
+            "String password = Secrets.get(\"bossrest.password\");\n"
+            "String url = \"https://secure.example.com/api\";"
+        ),
+        "SEC-002": (
+            "String unid = request.getParameter(\"unid\");\n"
+            "if (!accessControl.canOpen(unid, user)) {\n"
+            "  throw new SecurityException(\"Unauthorized document access\");\n"
+            "}\n"
+            "Document doc = db.getDocumentByUNID(unid);"
+        ),
+        "DOM-BS-002": (
+            "// Caller owns recycle after helper returns Document\n"
+            "Document doc = null;\n"
+            "try {\n"
+            "  doc = fetchDoc(unid);\n"
+            "  // ... work ...\n"
+            "} finally {\n"
+            "  if (doc != null) doc.recycle();\n"
+            "}"
+        ),
     }
 
     if ls:
@@ -563,7 +985,10 @@ def attach_snippet_fields(
     remediation: str,
     handle_lifecycle_warning: str,
     rule_id: str | None = None,
+    has_loop: bool | None = None,
 ) -> dict[str, Any]:
+    from analytics.code_auditor.context import body_has_loop
+
     snippet, line_start, line_end, _hl, structured = extract_line_window(
         unit.body,
         focus_line=focus_line,
@@ -571,19 +996,20 @@ def attach_snippet_fields(
         radius=10,
     )
     as_is = snippet if snippet.strip() else evidence
+    looped = body_has_loop(unit.body) if has_loop is None else bool(has_loop)
 
     # Always prefer language-aware template when we know the rule
     if rule_id:
-        to_be = remediation_template(rule_id, unit.language)
+        to_be = remediation_template(rule_id, unit.language, has_loop=looped)
     else:
         # If caller passed a Java template but unit is LotusScript, replace it
         rem = (remediation or "").strip()
         if normalize_language(unit.language) == "lotusscript" and (
             "try {" in rem or ".recycle()" in rem or rem.startswith("//")
         ):
-            to_be = remediation_template("DOM-002", unit.language)
+            to_be = remediation_template("DOM-002", unit.language, has_loop=looped)
         else:
-            to_be = rem or remediation_template("DOM-010", unit.language)
+            to_be = rem or remediation_template("DOM-010", unit.language, has_loop=looped)
 
     rid = rule_id or "DOM-010"
     return {

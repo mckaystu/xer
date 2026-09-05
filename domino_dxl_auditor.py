@@ -3,9 +3,14 @@
 Domino DXL Code Analysis & AI Quality Auditor
 
 Scans DXL exports or On-Disk Project sources for Domino C-API handle leaks,
-ODA vs lotus.domino conflicts, static handle lifetime bugs, expensive
-data-access patterns, and LotusScript-native Delete lifecycle issues
-(LS-DOM-001..004). Emits a console summary plus Markdown/JSON reports.
+ODA vs lotus.domino conflicts, static handle lifetime bugs, Item/MIME/ViewNav
+lifecycle gaps (DOM-014..016, LS-DOM-005..008), Performance & NIF anti-patterns
+(PERF-001..003), and basic security rules (SEC-001/002). Severity is loop-aware:
+collection-loop leaks are CRITICAL; one-shot helpers (e.g. EncodeBase64) are
+MEDIUM/LOW hygiene findings with linear Delete/try-finally templates.
+With ``--llm``, runs a three-pass AI discrepancy audit (FP filter with
+VERIFIED_NON_LOOP demotion, blind spots, cross-module ownership). Emits a
+console summary plus Markdown/JSON reports.
 
 Setup
 -----
@@ -23,7 +28,7 @@ Examples
   # Directory of DXL / ODP sources with report output
   python3 domino_dxl_auditor.py ./dxl_input --out-dir analysis
 
-  # Enable AI discrepancy audit (false-positive filter + blind-spot detector)
+  # Enable AI discrepancy audit (FP filter + blind spots + ownership Pass 3)
   python3 domino_dxl_auditor.py ./dxl_input --llm --out-dir analysis
 
   # Audit code already stored in a Xer application_graph.json

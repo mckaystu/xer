@@ -288,9 +288,198 @@ def detect_ls_dom004(unit: CodeUnit) -> list[Finding]:
     return findings
 
 
+# ---------------------------------------------------------------------------
+# LS-DOM-005..008 — Item/MIME, ViewNav, error-handler bypass, search collections
+# ---------------------------------------------------------------------------
+
+RE_LS_ITEM_MIME = re.compile(
+    r"(?i)Set\s+(?P<var>[A-Za-z_]\w*)\s*=\s*\w+\."
+    r"(?P<meth>GetFirstItem|GetMIMEEntity|CreateMIMEEntity|CreateRichTextItem|GetFirstMIMEEntity)\s*\("
+)
+RE_LS_VIEWNAV = re.compile(
+    r"(?i)(?:Set\s+(?P<var>[A-Za-z_]\w*)\s*=\s*\w+\."
+    r"(?P<meth>CreateViewNav|CreateViewNavFrom|GetAllEntriesByKey|GetAllEntries|AllEntries)\s*\("
+    r"|Dim\s+(?P<var2>[A-Za-z_]\w*)\s+As\s+Notes(?P<type>ViewNavigator|ViewEntryCollection)\b)"
+)
+RE_LS_ON_ERROR = re.compile(r"(?im)^\s*On\s+Error\s+GoTo\s+(?P<label>\w+)")
+RE_LS_LABEL = re.compile(r"(?im)^(?P<label>\w+)\s*:")
+RE_LS_SEARCH = re.compile(
+    r"(?i)Set\s+(?P<var>[A-Za-z_]\w*)\s*=\s*\w+\.(?P<meth>Search|FTSearch)\s*\("
+)
+RE_LS_LOOPISH = re.compile(r"(?i)\b(?:Do\s+While|Do\s+Until|Forall|(?<![\w.])While|For\s+)\b")
+
+
+def detect_ls_dom005(unit: CodeUnit) -> list[Finding]:
+    """Item / MIME / RichText handles without Delete."""
+    if not _is_lotusscript(unit):
+        return []
+    findings: list[Finding] = []
+    for match in RE_LS_ITEM_MIME.finditer(unit.body):
+        var = match.group("var")
+        meth = match.group("meth")
+        # Require loop OR method-sized block without Delete of that var
+        in_loop = _loop_region_containing(unit.body, match.start()) is not None
+        if not in_loop and unit.body.count("\n") < 8:
+            continue
+        region = unit.body
+        if in_loop:
+            region = _loop_region_containing(unit.body, match.start())[2]  # type: ignore[index]
+        if _has_ls_cleanup(region, var):
+            continue
+        # Also accept Delete anywhere after if not in loop
+        if not in_loop and _has_ls_cleanup(unit.body[match.start() :], var):
+            continue
+        line = _line_of(unit.body, match.start(), unit.start_line)
+        findings.append(
+            _finding(
+                "LS-DOM-005",
+                unit,
+                line=line,
+                evidence=_snippet(unit.body, match.start()),
+                confidence=88,
+                impact=(
+                    f"`{meth}` assigns `{var}` without `Delete {var}`. Item/MIME/RichText handles "
+                    "are native C-API objects and leak when left alive across iterations or Sub exit."
+                ),
+                remediation=remediation_template("LS-DOM-005", unit.language),
+                action=f"Delete `{var}` after use (especially inside loops).",
+                handle_lifecycle_warning=f"Line {line}: `{var}` from {meth} never Deleted.",
+            )
+        )
+    return findings
+
+
+def detect_ls_dom006(unit: CodeUnit) -> list[Finding]:
+    """ViewNavigator / ViewEntryCollection without Delete."""
+    if not _is_lotusscript(unit):
+        return []
+    findings: list[Finding] = []
+    for match in RE_LS_VIEWNAV.finditer(unit.body):
+        var = match.group("var") or match.group("var2")
+        if not var:
+            continue
+        if _has_ls_cleanup(unit.body, var):
+            continue
+        line = _line_of(unit.body, match.start(), unit.start_line)
+        findings.append(
+            _finding(
+                "LS-DOM-006",
+                unit,
+                line=line,
+                evidence=_snippet(unit.body, match.start()),
+                confidence=92,
+                impact=(
+                    f"NotesViewNavigator / NotesViewEntryCollection `{var}` is created without "
+                    f"`Delete {var}`. Orphaned navigators retain NIF locks and exhaust the handle table."
+                ),
+                remediation=remediation_template("LS-DOM-006", unit.language),
+                action=f"Delete `{var}` after iteration completes (children first, then navigator).",
+                handle_lifecycle_warning=f"Line {line}: ViewNav/EntryCollection `{var}` never Deleted.",
+            )
+        )
+    return findings
+
+
+def detect_ls_dom007(unit: CodeUnit) -> list[Finding]:
+    """On Error GoTo handler exits without Delete of Notes* temps."""
+    if not _is_lotusscript(unit):
+        return []
+    on_err = RE_LS_ON_ERROR.search(unit.body)
+    if not on_err:
+        return []
+    label = on_err.group("label")
+    # Find handler label block
+    label_m = None
+    for m in RE_LS_LABEL.finditer(unit.body):
+        if m.group("label").lower() == label.lower() and m.start() > on_err.start():
+            label_m = m
+            break
+    if not label_m:
+        return []
+    handler = unit.body[label_m.start() :]
+    # Truncate at next End Sub/Function if present
+    end_m = re.search(r"(?im)^\s*End\s+(?:Sub|Function)\b", handler)
+    if end_m:
+        handler = handler[: end_m.start()]
+
+    # Did the main body allocate NotesDocument/Database?
+    alloc = re.search(
+        r"(?i)\b(?:NotesDocument|NotesDatabase|NotesView|NotesViewEntry|NotesMIMEEntity|NotesItem)\b"
+        r"|GetDocumentByUNID|CreateDocument|GetFirstDocument|CreateViewNav",
+        unit.body[: label_m.start()],
+    )
+    if not alloc:
+        return []
+    if re.search(r"(?i)\bDelete\s+\w+", handler):
+        return []
+    # Handler must actually exit somehow
+    if not re.search(r"(?i)\b(?:Exit\s+Sub|Exit\s+Function|Resume\s+Next|End\b)", handler):
+        return []
+    line = _line_of(unit.body, label_m.start(), unit.start_line)
+    return [
+        _finding(
+            "LS-DOM-007",
+            unit,
+            line=line,
+            evidence=_snippet(unit.body, label_m.start(), 280),
+            confidence=87,
+            impact=(
+                f"Error handler `{label}` exits without `Delete` of Notes* handles allocated in the "
+                "main path. Exceptions therefore bypass cleanup and leak C-API objects."
+            ),
+            remediation=remediation_template("LS-DOM-007", unit.language),
+            action=f"In `{label}:`, Delete temporary NotesDocument/Database/View handles before Exit/Resume.",
+            handle_lifecycle_warning=f"Line {line}: On Error handler `{label}` skips Delete cleanup.",
+        )
+    ]
+
+
+def detect_ls_dom008(unit: CodeUnit) -> list[Finding]:
+    """db.Search / FTSearch inside loops without Delete of the collection."""
+    if not _is_lotusscript(unit):
+        return []
+    findings: list[Finding] = []
+    for match in RE_LS_SEARCH.finditer(unit.body):
+        var = match.group("var")
+        meth = match.group("meth")
+        region = _loop_region_containing(unit.body, match.start())
+        if not region:
+            # Also flag if Search appears after a loop keyword nearby
+            window = unit.body[max(0, match.start() - 200) : match.start()]
+            if not RE_LS_LOOPISH.search(window):
+                continue
+            loop_text = unit.body[max(0, match.start() - 200) : match.end() + 400]
+        else:
+            loop_text = region[2]
+        if _has_ls_cleanup(loop_text, var):
+            continue
+        line = _line_of(unit.body, match.start(), unit.start_line)
+        findings.append(
+            _finding(
+                "LS-DOM-008",
+                unit,
+                line=line,
+                evidence=_snippet(unit.body, match.start()),
+                confidence=90,
+                impact=(
+                    f"In-loop `{meth}` assigns collection `{var}` without `Delete {var}`. "
+                    "Search/FTSearch collections are heavy native objects and leak per iteration."
+                ),
+                remediation=remediation_template("LS-DOM-008", unit.language),
+                action=f"Delete `{var}` before the next loop iteration after processing the collection.",
+                handle_lifecycle_warning=f"Line {line}: `{var}` from {meth} inside a loop is never Deleted.",
+            )
+        )
+    return findings
+
+
 LS_DETECTORS = [
     detect_ls_dom001,
     detect_ls_dom002,
     detect_ls_dom003,
     detect_ls_dom004,
+    detect_ls_dom005,
+    detect_ls_dom006,
+    detect_ls_dom007,
+    detect_ls_dom008,
 ]

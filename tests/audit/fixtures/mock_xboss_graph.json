@@ -1,0 +1,115 @@
+{
+  "meta": {
+    "database_title": "Mock xBoss (audit fixtures)",
+    "input_directory": "tests/audit/fixtures",
+    "nsf_path": "mock/xboss.nsf"
+  },
+  "business_logic": [
+    {
+      "language": "lotusscript",
+      "owner_name": "ls_dom001_leak",
+      "owner_type": "agent",
+      "event": "Initialize",
+      "source_file": "mock://xboss/ls_dom001_leak.lss",
+      "body": "Sub LsDom001Leak\n  Dim doc As NotesDocument\n  Set doc = view.GetFirstDocument()\n  Do While Not doc Is Nothing\n    Print doc.NoteID\n    Set doc = view.GetNextDocument(doc)\n  Loop\nEnd Sub\n"
+    },
+    {
+      "language": "lotusscript",
+      "owner_name": "ls_dom001_ok",
+      "owner_type": "agent",
+      "event": "Initialize",
+      "source_file": "mock://xboss/ls_dom001_ok.lss",
+      "body": "Sub LsDom001Ok\n  Dim doc As NotesDocument\n  Dim nextDoc As NotesDocument\n  Set doc = view.GetFirstDocument()\n  Do While Not doc Is Nothing\n    Set nextDoc = view.GetNextDocument(doc)\n    Delete doc\n    Set doc = nextDoc\n  Loop\nEnd Sub\n"
+    },
+    {
+      "language": "lotusscript",
+      "owner_name": "ls_dom005_item_leak",
+      "owner_type": "agent",
+      "event": "Initialize",
+      "source_file": "mock://xboss/ls_dom005_item_leak.lss",
+      "body": "Sub LsDom005ItemLeak\n  Dim doc As NotesDocument\n  Dim item As NotesItem\n  Set doc = view.GetFirstDocument()\n  Do While Not doc Is Nothing\n    Set item = doc.GetFirstItem(\"Body\")\n    Print item.Text\n    Set nextDoc = view.GetNextDocument(doc)\n    Delete doc\n    Set doc = nextDoc\n  Loop\nEnd Sub\n"
+    },
+    {
+      "language": "lotusscript",
+      "owner_name": "ls_dom007_error_bypass",
+      "owner_type": "agent",
+      "event": "Initialize",
+      "source_file": "mock://xboss/ls_dom007_error_bypass.lss",
+      "body": "Sub LsDom007ErrorBypass\n  On Error GoTo Fail\n  Dim doc As NotesDocument\n  Set doc = db.GetDocumentByUNID(unid$)\n  Print doc.NoteID\n  Exit Sub\nFail:\n  Print \"err\"\n  Exit Sub\nEnd Sub\n"
+    },
+    {
+      "language": "lotusscript",
+      "owner_name": "ls_perf001_no_autoupdate",
+      "owner_type": "agent",
+      "event": "Initialize",
+      "source_file": "mock://xboss/ls_perf001_no_autoupdate.lss",
+      "body": "Sub LsPerf001NoAutoUpdate\n  Dim doc As NotesDocument\n  Set doc = view.GetFirstDocument()\n  Do While Not doc Is Nothing\n    Call doc.ReplaceItemValue(\"X\", \"1\")\n    Call doc.Save(True, False)\n    Set nextDoc = view.GetNextDocument(doc)\n    Delete doc\n    Set doc = nextDoc\n  Loop\nEnd Sub\n"
+    },
+    {
+      "language": "lotusscript",
+      "owner_name": "ls_perf003_save_loop",
+      "owner_type": "agent",
+      "event": "Initialize",
+      "source_file": "mock://xboss/ls_perf003_save_loop.lss",
+      "body": "Sub LsPerf003SaveLoop\n  Dim doc As NotesDocument\n  Set doc = collection.GetFirstDocument()\n  Do While Not doc Is Nothing\n    Call doc.ReplaceItemValue(\"X\", \"1\")\n    Call doc.Save(True, False)\n    Set nextDoc = collection.GetNextDocument(doc)\n    Delete doc\n    Set doc = nextDoc\n  Loop\nEnd Sub\n"
+    },
+    {
+      "language": "lotusscript",
+      "owner_name": "ls_inventory_protected",
+      "owner_type": "agent",
+      "event": "Initialize",
+      "source_file": "mock://xboss/ls_inventory_protected.lss",
+      "body": "Sub LsInventoryProtected\n  Dim session As New NotesSession\n  Dim db As NotesDatabase\n  Dim view As NotesView\n  Dim doc As NotesDocument\n  Dim nextDoc As NotesDocument\n  Set db = session.CurrentDatabase\n  Set view = db.GetView(\"All\")\n  Set doc = view.GetFirstDocument()\n  Do While Not doc Is Nothing\n    Set nextDoc = view.GetNextDocument(doc)\n    Delete doc\n    Set doc = nextDoc\n  Loop\n  Delete view\nEnd Sub\n"
+    },
+    {
+      "language": "lotusscript",
+      "owner_name": "ls_safe_no_handles",
+      "owner_type": "agent",
+      "event": "Initialize",
+      "source_file": "mock://xboss/ls_safe_no_handles.lss",
+      "body": "Sub LsSafeNoHandles\n  Dim s As String\n  s = \"hello\"\n  Print s\nEnd Sub\n"
+    },
+    {
+      "language": "java",
+      "owner_name": "dom014_mime_leak",
+      "owner_type": "scriptlibrary",
+      "event": null,
+      "source_file": "mock://xboss/dom014_mime_leak.java",
+      "body": "public void mime(Document doc) throws NotesException {\n  MIMEEntity entity = doc.getMIMEEntity();\n  String s = entity.getContentAsText();\n}\n"
+    },
+    {
+      "language": "java",
+      "owner_name": "dom015_viewnav_leak",
+      "owner_type": "scriptlibrary",
+      "event": null,
+      "source_file": "mock://xboss/dom015_viewnav_leak.java",
+      "body": "public void nav(View view) throws NotesException {\n  ViewNavigator nav = view.createViewNav();\n  ViewEntry e = nav.getFirst();\n}\n"
+    },
+    {
+      "language": "java",
+      "owner_name": "dom016_search_in_loop",
+      "owner_type": "scriptlibrary",
+      "event": null,
+      "source_file": "mock://xboss/dom016_search_in_loop.java",
+      "body": "public void searchLoop(Database db) throws NotesException {\n  for (int i = 0; i < 5; i++) {\n    DocumentCollection coll = db.search(\"Form = \\\"Memo\\\"\", null, 0);\n    Document d = coll.getFirstDocument();\n  }\n}\n"
+    },
+    {
+      "language": "java",
+      "owner_name": "perf002_getview_loop",
+      "owner_type": "scriptlibrary",
+      "event": null,
+      "source_file": "mock://xboss/perf002_getview_loop.java",
+      "body": "public void getViewLoop(Database db) throws NotesException {\n  for (int i = 0; i < 10; i++) {\n    View view = db.getView(\"All\");\n    Document doc = view.getFirstDocument();\n  }\n}\n"
+    },
+    {
+      "language": "java",
+      "owner_name": "java_inventory_protected",
+      "owner_type": "scriptlibrary",
+      "event": null,
+      "source_file": "mock://xboss/java_inventory_protected.java",
+      "body": "public void protectedWalk(DocumentCollection coll) throws NotesException {\n  Document doc = null;\n  try {\n    doc = coll.getFirstDocument();\n    while (doc != null) {\n      Document next = coll.getNextDocument(doc);\n      doc.recycle();\n      doc = next;\n    }\n  } finally {\n    if (doc != null) doc.recycle();\n  }\n}\n"
+    }
+  ],
+  "nodes": [],
+  "edges": []
+}

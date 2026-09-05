@@ -1,0 +1,235 @@
+' Xer audit fixture — LotusScript positive / negative / edge cases
+' Annotation format:
+'   ' @case id=<name>
+'   ' @expect <RULE>[, RULE...]   optional — must fire
+'   ' @forbid <RULE>[, RULE...]   optional — must NOT fire
+'   ' @lang lotusscript
+
+' =============================================================================
+' @case id=ls_dom001_leak
+' @expect LS-DOM-001
+' @forbid NONE
+' =============================================================================
+Sub LsDom001Leak
+  Dim doc As NotesDocument
+  Set doc = view.GetFirstDocument()
+  Do While Not doc Is Nothing
+    Print doc.NoteID
+    Set doc = view.GetNextDocument(doc)
+  Loop
+End Sub
+
+' =============================================================================
+' @case id=ls_dom001_ok
+' @forbid LS-DOM-001
+' =============================================================================
+Sub LsDom001Ok
+  Dim doc As NotesDocument
+  Dim nextDoc As NotesDocument
+  Set doc = view.GetFirstDocument()
+  Do While Not doc Is Nothing
+    Set nextDoc = view.GetNextDocument(doc)
+    Delete doc
+    Set doc = nextDoc
+  Loop
+End Sub
+
+' =============================================================================
+' @case id=ls_dom002_lookup_leak
+' @expect LS-DOM-002
+' =============================================================================
+Sub LsDom002LookupLeak
+  Dim doc As NotesDocument
+  Dim other As NotesDocument
+  Set doc = view.GetFirstDocument()
+  Do While Not doc Is Nothing
+    Set other = db.GetDocumentByUNID(doc.UniversalID)
+    Print other.NoteID
+    Set doc = view.GetNextDocument(doc)
+  Loop
+End Sub
+
+' =============================================================================
+' @case id=ls_dom003_public
+' @expect LS-DOM-003
+' =============================================================================
+Public docCache As NotesDocument
+Sub LsDom003Public
+  Set docCache = db.GetDocumentByUNID(unid$)
+End Sub
+
+' =============================================================================
+' @case id=ls_dom004_set_nothing
+' @expect LS-DOM-004
+' =============================================================================
+Sub LsDom004SetNothing
+  Dim doc As NotesDocument
+  Set doc = db.GetDocumentByUNID(unid$)
+  Print doc.NoteID
+  Set doc = Nothing
+End Sub
+
+' =============================================================================
+' @case id=ls_dom005_item_leak
+' @expect LS-DOM-005
+' =============================================================================
+Sub LsDom005ItemLeak
+  Dim doc As NotesDocument
+  Dim item As NotesItem
+  Set doc = view.GetFirstDocument()
+  Do While Not doc Is Nothing
+    Set item = doc.GetFirstItem("Body")
+    Print item.Text
+    Set nextDoc = view.GetNextDocument(doc)
+    Delete doc
+    Set doc = nextDoc
+  Loop
+End Sub
+
+' =============================================================================
+' @case id=ls_dom006_viewnav_leak
+' @expect LS-DOM-006
+' =============================================================================
+Sub LsDom006ViewNavLeak
+  Dim nav As NotesViewNavigator
+  Set nav = view.CreateViewNav()
+  Print "walk"
+End Sub
+
+' =============================================================================
+' @case id=ls_dom007_error_bypass
+' @expect LS-DOM-007
+' =============================================================================
+Sub LsDom007ErrorBypass
+  On Error GoTo Fail
+  Dim doc As NotesDocument
+  Set doc = db.GetDocumentByUNID(unid$)
+  Print doc.NoteID
+  Exit Sub
+Fail:
+  Print "err"
+  Exit Sub
+End Sub
+
+' =============================================================================
+' @case id=ls_dom007_error_ok
+' @forbid LS-DOM-007
+' =============================================================================
+Sub LsDom007ErrorOk
+  On Error GoTo Fail
+  Dim doc As NotesDocument
+  Set doc = db.GetDocumentByUNID(unid$)
+  Print doc.NoteID
+  Delete doc
+  Exit Sub
+Fail:
+  If Not doc Is Nothing Then Delete doc
+  Exit Sub
+End Sub
+
+' =============================================================================
+' @case id=ls_dom008_search_in_loop
+' @expect LS-DOM-008
+' =============================================================================
+Sub LsDom008SearchInLoop
+  Dim doc As NotesDocument
+  Dim coll As NotesDocumentCollection
+  Set doc = view.GetFirstDocument()
+  Do While Not doc Is Nothing
+    Set coll = db.Search({Form="Memo"}, Nothing, 0)
+    Set doc = view.GetNextDocument(doc)
+  Loop
+End Sub
+
+' =============================================================================
+' @case id=ls_perf001_no_autoupdate
+' @expect PERF-001
+' =============================================================================
+Sub LsPerf001NoAutoUpdate
+  Dim doc As NotesDocument
+  Set doc = view.GetFirstDocument()
+  Do While Not doc Is Nothing
+    Call doc.ReplaceItemValue("X", "1")
+    Call doc.Save(True, False)
+    Set nextDoc = view.GetNextDocument(doc)
+    Delete doc
+    Set doc = nextDoc
+  Loop
+End Sub
+
+' =============================================================================
+' @case id=ls_perf001_ok
+' @forbid PERF-001
+' =============================================================================
+Sub LsPerf001Ok
+  view.AutoUpdate = False
+  Dim doc As NotesDocument
+  Set doc = view.GetFirstDocument()
+  Do While Not doc Is Nothing
+    Call doc.Save(True, False)
+    Set nextDoc = view.GetNextDocument(doc)
+    Delete doc
+    Set doc = nextDoc
+  Loop
+  view.AutoUpdate = True
+End Sub
+
+' =============================================================================
+' @case id=ls_perf002_getview_loop
+' @expect PERF-002
+' =============================================================================
+Sub LsPerf002GetViewLoop
+  Dim i As Integer
+  Dim v As NotesView
+  For i = 1 To 10
+    Set v = db.GetView("All")
+    Print v.Name
+  Next
+End Sub
+
+' =============================================================================
+' @case id=ls_perf003_save_loop
+' @expect PERF-003
+' =============================================================================
+Sub LsPerf003SaveLoop
+  Dim doc As NotesDocument
+  Set doc = collection.GetFirstDocument()
+  Do While Not doc Is Nothing
+    Call doc.ReplaceItemValue("X", "1")
+    Call doc.Save(True, False)
+    Set nextDoc = collection.GetNextDocument(doc)
+    Delete doc
+    Set doc = nextDoc
+  Loop
+End Sub
+
+' =============================================================================
+' @case id=ls_inventory_protected
+' @forbid LS-DOM-001
+' =============================================================================
+Sub LsInventoryProtected
+  Dim session As New NotesSession
+  Dim db As NotesDatabase
+  Dim view As NotesView
+  Dim doc As NotesDocument
+  Dim nextDoc As NotesDocument
+  Set db = session.CurrentDatabase
+  Set view = db.GetView("All")
+  Set doc = view.GetFirstDocument()
+  Do While Not doc Is Nothing
+    Set nextDoc = view.GetNextDocument(doc)
+    Delete doc
+    Set doc = nextDoc
+  Loop
+  Delete view
+End Sub
+
+' =============================================================================
+' @case id=ls_safe_no_handles
+' @forbid LS-DOM-001,LS-DOM-002,LS-DOM-003,LS-DOM-004
+' =============================================================================
+Sub LsSafeNoHandles
+  Dim s As String
+  s = "hello"
+  Print s
+End Sub

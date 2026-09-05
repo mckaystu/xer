@@ -94,9 +94,74 @@ RULE_CATALOG: dict[str, dict[str, str]] = {
         "category": "LotusScript Handle Lifecycle",
         "default_severity": "MEDIUM",
     },
+    "DOM-014": {
+        "title": "Un-Recycled Item & MIME Handles",
+        "category": "C-API Handle Leaks & Object Recycling",
+        "default_severity": "HIGH",
+    },
+    "LS-DOM-005": {
+        "title": "Un-Recycled Item & MIME Handles",
+        "category": "LotusScript Handle Lifecycle",
+        "default_severity": "HIGH",
+    },
+    "DOM-015": {
+        "title": "Un-Recycled ViewNavigator / ViewEntryCollection",
+        "category": "C-API Handle Leaks & Object Recycling",
+        "default_severity": "CRITICAL",
+    },
+    "LS-DOM-006": {
+        "title": "Un-Recycled ViewNavigator / ViewEntryCollection",
+        "category": "LotusScript Handle Lifecycle",
+        "default_severity": "CRITICAL",
+    },
+    "LS-DOM-007": {
+        "title": "Bypass Cleanup in Error Handler",
+        "category": "LotusScript Handle Lifecycle",
+        "default_severity": "HIGH",
+    },
+    "DOM-016": {
+        "title": "In-Loop Search Collection Leaks",
+        "category": "C-API Handle Leaks & Object Recycling",
+        "default_severity": "HIGH",
+    },
+    "LS-DOM-008": {
+        "title": "In-Loop Search Collection Leaks",
+        "category": "LotusScript Handle Lifecycle",
+        "default_severity": "HIGH",
+    },
+    "PERF-001": {
+        "title": "Missing view.AutoUpdate = False in Write Loops",
+        "category": "Performance & NIF Indexing",
+        "default_severity": "HIGH",
+    },
+    "PERF-002": {
+        "title": "Hoistable db.getView() Inside Loop",
+        "category": "Performance & NIF Indexing",
+        "default_severity": "MEDIUM",
+    },
+    "PERF-003": {
+        "title": "Un-batched Document Save in Large Iteration",
+        "category": "Performance & NIF Indexing",
+        "default_severity": "MEDIUM",
+    },
     "DOM-BS-001": {
         "title": "Uncovered Handle Leak (AI Blind Spot)",
         "category": "AI Discrepancy & Blind Spots",
+        "default_severity": "HIGH",
+    },
+    "DOM-BS-002": {
+        "title": "Unassigned Cross-Function Handle Ownership",
+        "category": "AI Discrepancy & Blind Spots",
+        "default_severity": "HIGH",
+    },
+    "SEC-001": {
+        "title": "Hardcoded Credentials / Plaintext HTTP",
+        "category": "Application Security",
+        "default_severity": "HIGH",
+    },
+    "SEC-002": {
+        "title": "Unvalidated Query String Document Lookup",
+        "category": "Application Security",
         "default_severity": "HIGH",
     },
 }
@@ -207,10 +272,14 @@ class AuditReport:
 
     def ai_discrepancy_summary(self) -> dict[str, int]:
         verified = sum(1 for f in self.findings if f.ai_validation_status == "VERIFIED")
+        verified_non_loop = sum(
+            1 for f in self.findings if f.ai_validation_status == "VERIFIED_NON_LOOP"
+        )
         fps = sum(1 for f in self.findings if f.is_false_positive)
         blinds = sum(1 for f in self.findings if f.is_blind_spot)
         return {
             "ai_verified": verified,
+            "ai_verified_non_loop": verified_non_loop,
             "false_positives": fps,
             "blind_spots": blinds,
             "active_findings": len(self.active_findings()),

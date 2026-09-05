@@ -11,6 +11,11 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any, Iterable, Literal
 
+from analytics.code_auditor.context import (
+    NON_LOOP_HYGIENE_NOTE,
+    body_has_loop,
+    inventory_risk_severity,
+)
 from analytics.code_auditor.extractor import (
     apply_prefilter,
     extract_units_from_graph,
@@ -118,6 +123,8 @@ class FunctionRecord:
     remediation_guide: str = ""
     handle_lifecycle_warning: str = ""
     language_label: str = ""
+    in_loop: bool = False
+    risk_severity: str = "MEDIUM"
 
     def to_dict(self) -> dict[str, Any]:
         data = asdict(self)
@@ -125,6 +132,7 @@ class FunctionRecord:
         data["issue"] = f"{self.function_name} — {self.status.replace('_', ' ').title()}"
         data["location"] = f"{self.design_element} L{self.start_line}"
         data["line_number"] = self.highlight_line or self.start_line
+        data["severity"] = self.risk_severity
         return data
 
 
@@ -341,25 +349,50 @@ def _focus_offset(analysis_body: str, status: FunctionStatus, language: str) -> 
     return 0
 
 
-def _inventory_guides(status: FunctionStatus, language: str, function_name: str) -> tuple[str, str, str, str]:
+def _inventory_guides(
+    status: FunctionStatus, language: str, function_name: str, *, in_loop: bool
+) -> tuple[str, str, str, str]:
     """problem, guide, warning, to_be_template."""
-    lang = language
-    is_ls = _is_lotusscript_lang(lang) or language == "LotusScript"
+    is_ls = _is_lotusscript_lang(language) or language == "LotusScript"
     if status == "UNPROTECTED_ALLOCATION":
-        problem = (
-            f"`{function_name}` allocates Domino handles but never releases them with "
-            f"{'`Delete`' if is_ls else '`.recycle()`'} before exit. Native C-API memory stays "
-            "pinned until the agent/HTTP thread dies."
-        )
-        guide = (
-            "Capture the next handle first, finish work, then "
-            + ("`Delete` the current Notes* object before advancing." if is_ls else "`.recycle()` in a `finally` before advancing.")
-        )
-        warning = (
-            "Unprotected allocation — each call path that opens Documents/Views without cleanup "
-            "contributes to handle-table exhaustion."
-        )
-        to_be = remediation_template("LS-DOM-001" if is_ls else "DOM-002", "lotusscript" if is_ls else "java")
+        if in_loop:
+            problem = (
+                f"`{function_name}` allocates Domino handles inside a loop but never releases "
+                f"them with {'`Delete`' if is_ls else '`.recycle()`'} before advancing. "
+                "Each iteration can exhaust the C-API handle table."
+            )
+            guide = (
+                "Capture the next handle first, finish work, then "
+                + (
+                    "`Delete` the current Notes* object before advancing."
+                    if is_ls
+                    else "`.recycle()` in a `finally` before advancing."
+                )
+            )
+            warning = (
+                "CRITICAL handle exhaustion risk — unprotected allocation inside a collection loop."
+            )
+            to_be = remediation_template(
+                "LS-DOM-001" if is_ls else "DOM-002",
+                "lotusscript" if is_ls else "java",
+                has_loop=True,
+            )
+        else:
+            problem = (
+                f"`{function_name}` is a one-shot helper that allocates Domino handles without "
+                f"explicit {'`Delete`' if is_ls else '`.recycle()`'}. This is routine memory "
+                "hygiene — not a hot-path handle exhaustion loop."
+            )
+            guide = (
+                "Add a linear cleanup before Exit: "
+                + ("`Delete doc` / `Delete mime`." if is_ls else "`try/finally` + `.recycle()`.")
+            )
+            warning = "Routine memory hygiene (non-loop). " + NON_LOOP_HYGIENE_NOTE
+            to_be = remediation_template(
+                "LS-DOM-004" if is_ls else "DOM-010",
+                "lotusscript" if is_ls else "java",
+                has_loop=False,
+            )
     elif status == "PROTECTED":
         problem = (
             f"`{function_name}` allocates Domino handles and contains explicit cleanup "
@@ -371,7 +404,11 @@ def _inventory_guides(status: FunctionStatus, language: str, function_name: str)
             "' Already protected pattern — retain Delete / Recycle on all paths\n"
             if is_ls
             else "// Already protected — keep recycle() in finally on all paths\n"
-        ) + remediation_template("LS-DOM-001" if is_ls else "DOM-002", "lotusscript" if is_ls else "java")
+        ) + remediation_template(
+            "LS-DOM-001" if is_ls else "DOM-002",
+            "lotusscript" if is_ls else "java",
+            has_loop=in_loop,
+        )
     else:
         problem = (
             f"`{function_name}` does not appear to allocate Domino native handles "
@@ -379,7 +416,11 @@ def _inventory_guides(status: FunctionStatus, language: str, function_name: str)
         )
         guide = "No recycle action required for this routine based on static heuristics."
         warning = "Safe (no handles) — re-check if this helper is called with live handles passed in."
-        to_be = "' No Domino handle allocation detected — no recycle changes required." if is_ls else "// No Domino handle allocation detected."
+        to_be = (
+            "' No Domino handle allocation detected — no recycle changes required."
+            if is_ls
+            else "// No Domino handle allocation detected."
+        )
     return problem, guide, warning, to_be
 
 
@@ -391,6 +432,7 @@ def _attach_inventory_snippets(
     status: FunctionStatus,
     language: str,
     function_name: str,
+    in_loop: bool,
 ) -> dict[str, Any]:
     # Map analysis offset → absolute line in display_body
     # Prefer highlighting inside display text by searching the same token
@@ -411,7 +453,9 @@ def _attach_inventory_snippets(
         base_line=start_line,
         radius=radius,
     )
-    problem, guide, warning, to_be = _inventory_guides(status, language, function_name)
+    problem, guide, warning, to_be = _inventory_guides(
+        status, language, function_name, in_loop=in_loop
+    )
     return {
         "code_snippet_as_is": snippet,
         "code_snippet_to_be": to_be,
@@ -436,6 +480,8 @@ def build_inventory(units: Iterable[CodeUnit]) -> list[FunctionRecord]:
             recycle_count = _count_cleanup(fn_body, unit.language)
             status = _classify(allocates, recycle_count)
             lang_label = _language_label(unit.language)
+            looped = body_has_loop(fn_body)
+            risk = inventory_risk_severity(status=status, in_loop=looped)
             snippets = _attach_inventory_snippets(
                 display_body=display_body or fn_body,
                 analysis_body=fn_body,
@@ -443,6 +489,7 @@ def build_inventory(units: Iterable[CodeUnit]) -> list[FunctionRecord]:
                 status=status,
                 language=unit.language,
                 function_name=name,
+                in_loop=looped,
             )
             records.append(
                 FunctionRecord(
@@ -456,6 +503,8 @@ def build_inventory(units: Iterable[CodeUnit]) -> list[FunctionRecord]:
                     loc=_loc(fn_body),
                     source_file=unit.source_file,
                     start_line=start_line,
+                    in_loop=looped,
+                    risk_severity=risk,
                     **snippets,
                 )
             )

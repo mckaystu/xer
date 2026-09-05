@@ -346,7 +346,7 @@ End Sub
         )
         assert "LS-DOM-002" in rules(unit)
         f = findings_for(unit, "LS-DOM-002")[0]
-        assert f.severity == "HIGH"
+        assert f.severity == "CRITICAL"  # in-loop → handle exhaustion
 
     def test_in_loop_createdocument_without_delete(self):
         unit = ls(
@@ -421,8 +421,9 @@ End Sub
         )
         assert "LS-DOM-004" in rules(unit)
         f = findings_for(unit, "LS-DOM-004")[0]
-        assert f.severity == "MEDIUM"
+        assert f.severity == "LOW"  # one-shot helper → routine hygiene
         assert "Delete" in (f.code_snippet_to_be or "")
+        assert "GetNextDocument" not in (f.code_snippet_to_be or "")
 
     def test_java_recycle_rules_do_not_fire_on_lotusscript_loops(self):
         unit = ls(
@@ -563,7 +564,7 @@ public String bad(Session session, String raw) throws NotesException {
         )
         assert "DOM-001" in rules(unit)
         f = findings_for(unit, "DOM-001")[0]
-        assert f.severity == "CRITICAL"
+        assert f.severity == "MEDIUM"  # non-loop one-shot → demoted from CRITICAL
 
     def test_chained_createdatetime_short_session_var(self):
         unit = java(
@@ -848,3 +849,166 @@ Public gDoc As NotesDocument
         assert "LS-DOM-001" in rule_ids
         assert "DOM-001" in rule_ids
         assert "LS-DOM-003" in rule_ids
+
+
+# ---------------------------------------------------------------------------
+# Advanced Item/MIME/ViewNav/Search + Performance & NIF
+# ---------------------------------------------------------------------------
+
+
+class TestAdvancedHandleAndPerfRules:
+    def test_ls_dom005_item_in_loop(self):
+        unit = ls(
+            "ItemLeak",
+            """
+Sub Initialize
+  Dim doc As NotesDocument
+  Dim item As NotesItem
+  Set doc = view.GetFirstDocument()
+  Do While Not doc Is Nothing
+    Set item = doc.GetFirstItem("Body")
+    Print item.Text
+    Set nextDoc = view.GetNextDocument(doc)
+    Delete doc
+    Set doc = nextDoc
+  Loop
+End Sub
+""",
+        )
+        assert "LS-DOM-005" in rules(unit)
+
+    def test_ls_dom006_viewnav(self):
+        unit = ls(
+            "NavLeak",
+            """
+Sub Initialize
+  Dim nav As NotesViewNavigator
+  Set nav = view.CreateViewNav()
+End Sub
+""",
+        )
+        assert "LS-DOM-006" in rules(unit)
+
+    def test_ls_dom007_error_handler(self):
+        unit = ls(
+            "ErrLeak",
+            """
+Sub Initialize
+  On Error GoTo Fail
+  Dim doc As NotesDocument
+  Set doc = db.GetDocumentByUNID(unid$)
+  Exit Sub
+Fail:
+  Exit Sub
+End Sub
+""",
+        )
+        assert "LS-DOM-007" in rules(unit)
+
+    def test_ls_dom008_search_in_loop(self):
+        unit = ls(
+            "SearchLeak",
+            """
+Sub Initialize
+  Dim doc As NotesDocument
+  Dim coll As NotesDocumentCollection
+  Set doc = view.GetFirstDocument()
+  Do While Not doc Is Nothing
+    Set coll = db.Search({Form="Memo"}, Nothing, 0)
+    Set doc = view.GetNextDocument(doc)
+  Loop
+End Sub
+""",
+        )
+        assert "LS-DOM-008" in rules(unit)
+
+    def test_dom014_mime(self):
+        unit = java(
+            "Mime",
+            """
+public void mime(Document doc) throws NotesException {
+  MIMEEntity entity = doc.getMIMEEntity();
+  String s = entity.getContentAsText();
+}
+""",
+        )
+        assert "DOM-014" in rules(unit)
+
+    def test_dom015_viewnav(self):
+        unit = java(
+            "Nav",
+            """
+public void nav(View view) throws NotesException {
+  ViewNavigator nav = view.createViewNav();
+  ViewEntry e = nav.getFirst();
+}
+""",
+        )
+        assert "DOM-015" in rules(unit)
+
+    def test_perf001_autoupdate(self):
+        unit = ls(
+            "NoAuto",
+            """
+Sub Initialize
+  Dim doc As NotesDocument
+  Set doc = view.GetFirstDocument()
+  Do While Not doc Is Nothing
+    Call doc.ReplaceItemValue("X", "1")
+    Call doc.Save(True, False)
+    Set doc = view.GetNextDocument(doc)
+  Loop
+End Sub
+""",
+        )
+        assert "PERF-001" in rules(unit)
+
+    def test_perf001_ok_when_autoupdate_false(self):
+        unit = ls(
+            "AutoOk",
+            """
+Sub Initialize
+  view.AutoUpdate = False
+  Dim doc As NotesDocument
+  Set doc = view.GetFirstDocument()
+  Do While Not doc Is Nothing
+    Call doc.Save(True, False)
+    Set doc = view.GetNextDocument(doc)
+  Loop
+  view.AutoUpdate = True
+End Sub
+""",
+        )
+        assert "PERF-001" not in rules(unit)
+
+    def test_perf002_getview_in_loop(self):
+        unit = java(
+            "GetViewLoop",
+            """
+public void walk(Database db) throws NotesException {
+  for (int i = 0; i < 10; i++) {
+    View view = db.getView("All");
+    Document doc = view.getFirstDocument();
+  }
+}
+""",
+        )
+        assert "PERF-002" in rules(unit)
+
+    def test_perf003_save_in_loop(self):
+        unit = java(
+            "SaveLoop",
+            """
+public void walk(DocumentCollection coll) throws NotesException {
+  Document doc = coll.getFirstDocument();
+  while (doc != null) {
+    doc.replaceItemValue("X", "1");
+    doc.save(true, false);
+    Document next = coll.getNextDocument(doc);
+    doc.recycle();
+    doc = next;
+  }
+}
+""",
+        )
+        assert "PERF-003" in rules(unit)

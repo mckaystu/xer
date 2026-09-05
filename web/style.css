@@ -998,6 +998,23 @@ th { color: var(--muted); font-weight: 500; }
   background: rgba(224, 123, 57, 0.22);
   color: #f0b080;
 }
+.ai-badge-perf {
+  background: rgba(91, 159, 212, 0.2);
+  color: #8ec0e8;
+}
+
+.perf-callout {
+  margin: 12px 0;
+  padding: 10px 12px;
+  border-radius: 6px;
+  border: 1px solid rgba(91, 159, 212, 0.4);
+  background: rgba(91, 159, 212, 0.1);
+  font-size: 0.78rem;
+}
+.perf-callout p {
+  margin: 6px 0 0;
+  color: var(--muted);
+}
 
 .ai-note {
   margin: 12px 0;

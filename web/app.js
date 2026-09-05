@@ -101,7 +101,7 @@ let currentSummary = null;
 let currentAnalysis = null;
 let currentCodeAudit = null;
 let currentFunctionInventory = null;
-let auditFindingFilter = "all"; // all | verified | false_positive | blind_spot
+let auditFindingFilter = "all"; // all | verified | false_positive | blind_spot | handle | performance | ai_discovered
 let fullGraph = null;
 let activeView = "focus";
 let focusNodeId = null;
@@ -867,7 +867,15 @@ function renderInventoryDeepDive(fn) {
   const warning = fn.handle_lifecycle_warning || "";
   const toBe = fn.code_snippet_to_be || "";
   const severity =
-    status === "UNPROTECTED_ALLOCATION" ? "CRITICAL" : status === "PROTECTED" ? "LOW" : "MEDIUM";
+    fn.risk_severity ||
+    fn.severity ||
+    (status === "UNPROTECTED_ALLOCATION"
+      ? fn.in_loop
+        ? "CRITICAL"
+        : "LOW"
+      : status === "PROTECTED"
+        ? "LOW"
+        : "MEDIUM");
 
   return `
     <div class="deep-dive-header">
@@ -940,7 +948,7 @@ function wireInventoryDeepDive() {
 }
 
 function findingFilterBucket(f) {
-  if (f.is_blind_spot || f.ai_validation_status === "BLIND_SPOT" || f.rule_id === "DOM-BS-001") {
+  if (f.is_blind_spot || f.ai_validation_status === "BLIND_SPOT" || String(f.rule_id || "").startsWith("DOM-BS")) {
     return "blind_spot";
   }
   if (f.is_false_positive || f.ai_validation_status === "FALSE_POSITIVE") {
@@ -952,6 +960,18 @@ function findingFilterBucket(f) {
   return "all";
 }
 
+function findingCategoryBucket(f) {
+  const rid = String(f.rule_id || "");
+  const cat = String(f.category || "");
+  if (rid.startsWith("PERF-") || cat.includes("Performance") || cat.includes("NIF")) {
+    return "performance";
+  }
+  if (rid.startsWith("DOM-BS") || f.is_blind_spot || cat.includes("AI Discrepancy")) {
+    return "ai";
+  }
+  return "handle";
+}
+
 function filterAuditFindings(findings, filter) {
   const list = findings || [];
   if (filter === "all") return list.map((f, idx) => ({ f, idx }));
@@ -959,9 +979,13 @@ function filterAuditFindings(findings, filter) {
     .map((f, idx) => ({ f, idx }))
     .filter(({ f }) => {
       const bucket = findingFilterBucket(f);
+      const cat = findingCategoryBucket(f);
       if (filter === "verified") return bucket === "verified";
       if (filter === "false_positive") return bucket === "false_positive";
       if (filter === "blind_spot") return bucket === "blind_spot";
+      if (filter === "handle") return cat === "handle" && !f.is_false_positive;
+      if (filter === "performance") return cat === "performance" && !f.is_false_positive;
+      if (filter === "ai_discovered") return cat === "ai" || bucket === "blind_spot";
       return true;
     });
 }
@@ -978,6 +1002,9 @@ function aiValidationBanner(finding) {
   } else if (status === "BLIND_SPOT" || finding.is_blind_spot) {
     title = "AI Validation Note — Blind Spot Discovered";
     cls += " ai-note-blind";
+  } else if (status === "VERIFIED_NON_LOOP") {
+    title = "AI Validation Note — Verified (Non-Loop Hygiene)";
+    cls += " ai-note-verified";
   } else if (status === "VERIFIED") {
     title = "AI Validation Note — Verified Leak";
     cls += " ai-note-verified";
@@ -1004,11 +1031,13 @@ function renderCodeAuditCard(audit) {
   const rows = filtered
     .map(({ f, idx }) => {
       const bucket = findingFilterBucket(f);
+      const cat = findingCategoryBucket(f);
       const badges = [];
+      if (cat === "performance") badges.push(`<span class="ai-badge ai-badge-perf">Performance &amp; NIF</span>`);
       if (bucket === "blind_spot") badges.push(`<span class="ai-badge ai-badge-blind">Blind Spot</span>`);
       else if (bucket === "false_positive") badges.push(`<span class="ai-badge ai-badge-fp">False Positive</span>`);
       else if (bucket === "verified") badges.push(`<span class="ai-badge ai-badge-verified">AI Verified</span>`);
-      return `<tr class="audit-row" data-finding-idx="${idx}" data-filter-bucket="${bucket}" role="button" tabindex="0">
+      return `<tr class="audit-row" data-finding-idx="${idx}" data-filter-bucket="${bucket}" data-category="${cat}" role="button" tabindex="0">
           <td><code>${escapeHtml(f.finding_id || f.id)}</code></td>
           <td><span class="sev-pill sev-${escapeHtml(f.severity)}">${escapeHtml(f.severity)}</span></td>
           <td><code>${escapeHtml(f.rule_id)}</code> ${escapeHtml(f.issue || f.title)} ${badges.join(" ")}</td>
@@ -1037,6 +1066,11 @@ function renderCodeAuditCard(audit) {
     typeof aiSum.blind_spots === "number"
       ? aiSum.blind_spots
       : findings.filter((f) => findingFilterBucket(f) === "blind_spot").length;
+  const handleCount = findings.filter((f) => findingCategoryBucket(f) === "handle" && !f.is_false_positive).length;
+  const perfCount = findings.filter((f) => findingCategoryBucket(f) === "performance" && !f.is_false_positive).length;
+  const aiCatCount = findings.filter(
+    (f) => findingCategoryBucket(f) === "ai" || findingFilterBucket(f) === "blind_spot"
+  ).length;
 
   return `
     <section class="overview-section score-section" id="codeAuditSection">
@@ -1049,11 +1083,16 @@ function renderCodeAuditCard(audit) {
             · scanned ${audit.blocks_prefiltered || 0}/${audit.blocks_scanned || 0} code blocks
             · ${audit.llm_enabled ? "AI discrepancy on" : "rules-only"}
             · click a row for As-Is / To-Be deep-dive</p>
-          <div class="findings-filter-bar" role="toolbar" aria-label="Findings filters">
+          <div class="findings-filter-bar" role="toolbar" aria-label="Category filters">
             ${filterBtn("all", "All Findings", findings.length)}
+            ${filterBtn("handle", "Handle Leaks", handleCount)}
+            ${filterBtn("performance", "Performance & NIF", perfCount)}
+            ${filterBtn("ai_discovered", "AI Discovered", aiCatCount)}
+          </div>
+          <div class="findings-filter-bar" role="toolbar" aria-label="AI validation filters">
             ${filterBtn("verified", "AI Verified", verifiedCount)}
             ${filterBtn("false_positive", "Flagged False Positives", fpCount)}
-            ${filterBtn("blind_spot", "AI Discovered Blind Spots", blindCount)}
+            ${filterBtn("blind_spot", "AI Blind Spots", blindCount)}
           </div>
           <div class="ai-actions">
             <button type="button" class="ai-run-btn" id="runAiValidationBtn" ${
@@ -1062,7 +1101,7 @@ function renderCodeAuditCard(audit) {
             <span class="score-hint" id="aiValidationStatus">${
               audit.llm_enabled
                 ? `Verified ${verifiedCount} · FP ${fpCount} · Blind spots ${blindCount}`
-                : "Uses OpenAI to filter false positives and find blind-spot leaks (requires API key on server)."
+                : "Uses OpenAI for false positives, blind spots, and cross-module ownership (requires API key)."
             }</span>
           </div>
         </div>
@@ -1192,6 +1231,14 @@ function renderAuditDeepDive(finding) {
     </div>
 
     ${warning ? `<p class="lifecycle-warning">${escapeHtml(warning)}</p>` : ""}
+
+    ${
+      String(finding.rule_id || "").startsWith("PERF-") || String(finding.category || "").includes("Performance")
+        ? `<div class="perf-callout" role="status"><strong>Performance impact</strong><p>${escapeHtml(
+            warning || finding.technical_impact || finding.problem_breakdown || ""
+          )}</p></div>`
+        : ""
+    }
 
     ${aiValidationBanner(finding)}
 

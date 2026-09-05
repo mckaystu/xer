@@ -5,6 +5,12 @@ from __future__ import annotations
 import re
 from typing import Iterable
 
+from analytics.code_auditor.context import (
+    LOOP_SENSITIVE_HANDLE_RULES,
+    NON_LOOP_HYGIENE_NOTE,
+    body_has_loop,
+    calibrate_handle_severity,
+)
 from analytics.code_auditor.models import RULE_CATALOG, CodeUnit, Finding
 from analytics.code_auditor.snippets import (
     attach_snippet_fields,
@@ -135,11 +141,23 @@ def _finding(
     action: str,
     engine: str = "rules",
     handle_lifecycle_warning: str | None = None,
+    in_loop: bool | None = None,
 ) -> Finding:
     meta = RULE_CATALOG[rule_id]
+    looped = body_has_loop(unit.body) if in_loop is None else in_loop
+    base_sev = severity or meta["default_severity"]
+    calibrated = calibrate_handle_severity(
+        rule_id, base_sev, in_loop=looped, body=unit.body
+    )
     warning = handle_lifecycle_warning or impact
-    # Always emit language-aware TO-BE (ignore hardcoded Java samples for LotusScript, etc.)
-    rem = remediation_template(rule_id, unit.language)
+    impact_text = impact
+    if rule_id in LOOP_SENSITIVE_HANDLE_RULES and not looped:
+        if NON_LOOP_HYGIENE_NOTE not in impact_text:
+            impact_text = f"{impact_text} {NON_LOOP_HYGIENE_NOTE}"
+        if warning and NON_LOOP_HYGIENE_NOTE not in warning:
+            warning = f"{warning} {NON_LOOP_HYGIENE_NOTE}"
+    # Language-aware TO-BE — linear Delete/try-finally when no loop
+    rem = remediation_template(rule_id, unit.language, has_loop=looped)
     snippet_fields = attach_snippet_fields(
         unit=unit,
         focus_line=line,
@@ -147,12 +165,13 @@ def _finding(
         remediation=rem,
         handle_lifecycle_warning=warning,
         rule_id=rule_id,
+        has_loop=looped,
     )
     return Finding(
         id="",  # assigned later
         rule_id=rule_id,
         title=meta["title"],
-        severity=(severity or meta["default_severity"]),  # type: ignore[arg-type]
+        severity=calibrated,  # type: ignore[arg-type]
         confidence=confidence,
         source_file=unit.source_file,
         element_name=unit.element_name,
@@ -160,7 +179,7 @@ def _finding(
         language=unit.language,
         line=line,
         evidence=evidence,
-        technical_impact=impact,
+        technical_impact=impact_text,
         remediation=rem,
         action_required=action,
         category=meta["category"],
@@ -670,6 +689,133 @@ def detect_dom013(unit: CodeUnit) -> list[Finding]:
     return findings
 
 
+RE_ITEM_MIME_JAVA = re.compile(
+    r"""(?P<type>\b(?:Item|MIMEEntity|RichTextItem)\b)\s+(?P<var>\w+)\s*=\s*\w+\s*\.\s*
+        (?P<meth>getFirstItem|getMIMEEntity|createMIMEEntity|createRichTextItem|getFirstMIMEEntity)\s*\("""
+    r"""|(?P<var2>\w+)\s*=\s*\w+\s*\.\s*
+        (?P<meth2>getFirstItem|getMIMEEntity|createMIMEEntity|createRichTextItem|getFirstMIMEEntity)\s*\(""",
+    re.I | re.X,
+)
+RE_VIEWNAV_JAVA = re.compile(
+    r"""(?P<type>\b(?:ViewNavigator|ViewEntryCollection)\b)\s+(?P<var>\w+)\s*="""
+    r"""|(?P<var2>\w+)\s*=\s*\w+\s*\.\s*
+        (?P<meth>createViewNav|createViewNavFrom|getAllEntriesByKey|getAllEntries)\s*\(""",
+    re.I | re.X,
+)
+RE_SEARCH_JAVA = re.compile(
+    r"""(?P<var>\w+)\s*=\s*\w+\s*\.\s*(?P<meth>search|FTSearch|ftSearch)\s*\(""",
+    re.I | re.X,
+)
+
+
+def detect_dom014(unit: CodeUnit) -> list[Finding]:
+    """Un-recycled Item / MIME / RichText handles (Java/SSJS)."""
+    lang = (unit.language or "").lower()
+    if "lotus" in lang or lang in {"ls", "lss", "notes"}:
+        return []
+    findings: list[Finding] = []
+    for match in RE_ITEM_MIME_JAVA.finditer(unit.body):
+        var = match.group("var") or match.group("var2") or "item"
+        meth = match.group("meth") or match.group("meth2") or "getFirstItem"
+        after = unit.body[match.end() :]
+        if re.search(rf"\b{re.escape(var)}\s*\.\s*recycle\s*\(", after, re.I):
+            continue
+        if re.search(r"\bfinally\b[\s\S]{0,400}?\.recycle\s*\(", after, re.I) and re.search(
+            rf"\b{re.escape(var)}\b", after[:500], re.I
+        ):
+            # soft: finally exists mentioning var — skip
+            if re.search(rf"\b{re.escape(var)}\s*\.\s*recycle\s*\(", after, re.I):
+                continue
+        line = _line_of(unit.body, match.start(), unit.start_line)
+        findings.append(
+            _finding(
+                "DOM-014",
+                unit,
+                line=line,
+                evidence=_snippet(unit.body, match.start()),
+                confidence=88,
+                impact=(
+                    f"`{meth}` creates Item/MIME handle `{var}` without `.recycle()`. "
+                    "These are native C-API objects and leak especially inside loops."
+                ),
+                remediation=remediation_template("DOM-014", unit.language),
+                action=f"Recycle `{var}` in a finally block after use.",
+                handle_lifecycle_warning=f"Line {line}: `{var}` from {meth} never recycled.",
+            )
+        )
+    return findings
+
+
+def detect_dom015(unit: CodeUnit) -> list[Finding]:
+    """Un-recycled ViewNavigator / ViewEntryCollection (Java/SSJS)."""
+    lang = (unit.language or "").lower()
+    if "lotus" in lang or lang in {"ls", "lss", "notes"}:
+        return []
+    findings: list[Finding] = []
+    for match in RE_VIEWNAV_JAVA.finditer(unit.body):
+        var = match.groupdict().get("var") or match.groupdict().get("var2")
+        if not var:
+            continue
+        if re.search(rf"\b{re.escape(var)}\s*\.\s*recycle\s*\(", unit.body, re.I):
+            continue
+        line = _line_of(unit.body, match.start(), unit.start_line)
+        findings.append(
+            _finding(
+                "DOM-015",
+                unit,
+                line=line,
+                evidence=_snippet(unit.body, match.start()),
+                confidence=92,
+                impact=(
+                    f"ViewNavigator/ViewEntryCollection `{var}` is created without `.recycle()`. "
+                    "Orphaned navigators hold NIF locks and exhaust the handle table."
+                ),
+                remediation=remediation_template("DOM-015", unit.language),
+                action=f"Recycle child entries then `{var}.recycle()` after the loop.",
+                handle_lifecycle_warning=f"Line {line}: navigator/collection `{var}` never recycled.",
+            )
+        )
+    return findings
+
+
+def detect_dom016(unit: CodeUnit) -> list[Finding]:
+    """db.search / FTSearch inside loops without recycling the collection."""
+    lang = (unit.language or "").lower()
+    if "lotus" in lang or lang in {"ls", "lss", "notes"}:
+        return []
+    if not RE_LOOP.search(unit.body):
+        return []
+    findings: list[Finding] = []
+    for match in RE_SEARCH_JAVA.finditer(unit.body):
+        var = match.group("var")
+        meth = match.group("meth")
+        # Rough: search call should be inside loop — require a loop keyword before match
+        before = unit.body[max(0, match.start() - 400) : match.start()]
+        if not re.search(r"\b(?:for|while)\b", before, re.I):
+            continue
+        after = unit.body[match.end() : match.end() + 500]
+        if re.search(rf"\b{re.escape(var)}\s*\.\s*recycle\s*\(", after, re.I):
+            continue
+        line = _line_of(unit.body, match.start(), unit.start_line)
+        findings.append(
+            _finding(
+                "DOM-016",
+                unit,
+                line=line,
+                evidence=_snippet(unit.body, match.start()),
+                confidence=90,
+                impact=(
+                    f"In-loop `{meth}` assigns collection `{var}` without `.recycle()`. "
+                    "Search collections are heavy native objects and leak per iteration."
+                ),
+                remediation=remediation_template("DOM-016", unit.language),
+                action=f"Recycle `{var}` before the next loop iteration.",
+                handle_lifecycle_warning=f"Line {line}: `{var}` from {meth} inside a loop is never recycled.",
+            )
+        )
+    return findings
+
+
 DETECTORS = [
     detect_dom001,
     detect_dom002,
@@ -684,19 +830,34 @@ DETECTORS = [
     detect_dom011,
     detect_dom012,
     detect_dom013,
+    detect_dom014,
+    detect_dom015,
+    detect_dom016,
 ]
 
 
 def run_rule_engine(units: Iterable[CodeUnit]) -> list[Finding]:
     from analytics.code_auditor.ls_rules import LS_DETECTORS, bind_helpers
+    from analytics.code_auditor.perf_rules import PERF_DETECTORS
+    from analytics.code_auditor.perf_rules import bind_helpers as bind_perf
+    from analytics.code_auditor.sec_rules import SEC_DETECTORS
+    from analytics.code_auditor.sec_rules import bind_helpers as bind_sec
 
     bind_helpers(finding=_finding, line_of=_line_of, snippet=_snippet)
+    bind_perf(finding=_finding, line_of=_line_of, snippet=_snippet)
+    bind_sec(finding=_finding, line_of=_line_of, snippet=_snippet)
 
     findings: list[Finding] = []
     for unit in units:
+        # Strict language gating: Java detectors skip LotusScript units and vice versa
+        # (individual detectors also gate; this keeps SEC/PERF universal).
         for detector in DETECTORS:
             findings.extend(detector(unit))
         for detector in LS_DETECTORS:
+            findings.extend(detector(unit))
+        for detector in PERF_DETECTORS:
+            findings.extend(detector(unit))
+        for detector in SEC_DETECTORS:
             findings.extend(detector(unit))
     # Assign stable IDs
     for idx, finding in enumerate(findings, start=1):
