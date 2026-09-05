@@ -749,6 +749,11 @@ function coverageRiskClass(rate) {
   return "risk-low";
 }
 
+function inventoryRiskClass(safetyRate, recycleAmongAllocators, allocating) {
+  if (allocating > 0 && recycleAmongAllocators < 50) return "risk-high";
+  return coverageRiskClass(safetyRate);
+}
+
 function renderFunctionInventoryCard(inventory) {
   if (!inventory?.summary) {
     return `<section class="overview-section"><h2>Function &amp; Recycle Inventory</h2><p class="placeholder">Inventory not available for this graph.</p></section>`;
@@ -776,7 +781,11 @@ function renderFunctionInventoryCard(inventory) {
       : allocating
         ? Math.round((withCleanup / allocating) * 1000) / 10
         : 100;
-  const riskClass = coverageRiskClass(safetyRate);
+  const riskClass = inventoryRiskClass(safetyRate, recycleAmongAllocators, allocating);
+  const allocatorCleanupWarning =
+    allocating > 0 && recycleAmongAllocators < 50
+      ? `<p class="score-hint coverage-warning" role="status"><strong>${recycleAmongAllocators}%</strong> of allocators actually clean up — handle-table risk remains high despite the blended safety rate.</p>`
+      : "";
   const rows = (inventory.inventory || [])
     .map(
       (f, idx) =>
@@ -839,6 +848,7 @@ function renderFunctionInventoryCard(inventory) {
             </div>
           </div>
         </div>
+        ${allocatorCleanupWarning}
         ${rateExplainer}
         <p class="score-hint coverage-hint">Click a table row for As-Is / To-Be deep-dive with the allocation line highlighted.</p>
         ${

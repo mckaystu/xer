@@ -96,8 +96,27 @@ def inventory_risk_severity(*, status: str, in_loop: bool) -> Severity:
     if status == "PROTECTED":
         return "LOW"
     if status == "SAFE_NO_HANDLES":
-        return "MEDIUM"
+        return "LOW"
     # UNPROTECTED_ALLOCATION
     if in_loop:
         return "CRITICAL"
     return "LOW"
+
+
+def inventory_ring_risk_class(
+    safety_rate: float,
+    recycle_among_allocators: float,
+    allocating: int,
+) -> str:
+    """Mirror of web/app.js ``inventoryRiskClass`` — CSS risk-* class for the inventory ring.
+
+    When any functions allocate handles but fewer than 50% clean up, force
+    ``risk-high`` even if the blended handle_safety_rate looks healthy.
+    """
+    if allocating > 0 and recycle_among_allocators < 50:
+        return "risk-high"
+    if safety_rate < 40:
+        return "risk-high"
+    if safety_rate < 75:
+        return "risk-moderate"
+    return "risk-low"

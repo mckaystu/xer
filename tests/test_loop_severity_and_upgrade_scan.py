@@ -6,7 +6,12 @@ from pathlib import Path
 
 import pytest
 
-from analytics.code_auditor.context import body_has_loop, calibrate_handle_severity
+from analytics.code_auditor.context import (
+    body_has_loop,
+    calibrate_handle_severity,
+    inventory_risk_severity,
+    inventory_ring_risk_class,
+)
 from analytics.code_auditor.function_inventory import build_inventory
 from analytics.code_auditor.models import CodeUnit, RULE_CATALOG
 from analytics.code_auditor.rules import run_rule_engine
@@ -82,6 +87,26 @@ End Sub
         assert calibrate_handle_severity("LS-DOM-004", "MEDIUM", in_loop=True) == "CRITICAL"
         assert body_has_loop("Do While Not doc Is Nothing") is True
         assert body_has_loop("Function EncodeBase64") is False
+
+    def test_safe_no_handles_is_low_severity(self):
+        assert inventory_risk_severity(status="SAFE_NO_HANDLES", in_loop=False) == "LOW"
+
+
+class TestInventoryRingRiskClass:
+    """Python mirror of web/app.js inventoryRiskClass()."""
+
+    def test_low_allocator_cleanup_forces_high(self):
+        # Blended safety can look healthy while 0% of allocators clean up
+        assert inventory_ring_risk_class(80.0, 0.0, allocating=9) == "risk-high"
+        assert inventory_ring_risk_class(90.0, 49.9, allocating=10) == "risk-high"
+
+    def test_falls_back_to_safety_rate_bands(self):
+        assert inventory_ring_risk_class(30.0, 100.0, allocating=5) == "risk-high"
+        assert inventory_ring_risk_class(50.0, 80.0, allocating=5) == "risk-moderate"
+        assert inventory_ring_risk_class(90.0, 80.0, allocating=5) == "risk-low"
+
+    def test_no_allocators_ignores_recycle_gate(self):
+        assert inventory_ring_risk_class(100.0, 0.0, allocating=0) == "risk-low"
 
 
 class TestSecRules:
