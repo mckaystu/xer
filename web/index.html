@@ -46,6 +46,10 @@
         <input type="checkbox" id="aggregateEdges" checked />
         Aggregate edges
       </label>
+      <label class="checkbox-label" id="issuesOnlyLabel">
+        <input type="checkbox" id="issuesOnly" />
+        Issues only
+      </label>
       <div class="zoom-controls" id="zoomControls">
         <button id="zoomInBtn" type="button" title="Zoom in">+</button>
         <button id="zoomOutBtn" type="button" title="Zoom out">−</button>
@@ -112,12 +116,19 @@
     <section class="main-panel graph-panel" id="graphPanel">
       <div id="network"></div>
       <div class="legend" id="legend">
-        <span class="legend-item"><i class="swatch form"></i>Form</span>
-        <span class="legend-item"><i class="swatch subform"></i>Subform</span>
-        <span class="legend-item"><i class="swatch lookup_view"></i>Lookup view</span>
-        <span class="legend-item"><i class="swatch view"></i>View</span>
-        <span class="legend-item"><i class="swatch agent"></i>Agent</span>
-        <span class="legend-item"><i class="swatch script_library"></i>Script lib</span>
+        <div class="legend-row">
+          <span class="legend-item"><i class="swatch form"></i>Form</span>
+          <span class="legend-item"><i class="swatch subform"></i>Subform</span>
+          <span class="legend-item"><i class="swatch lookup_view"></i>Lookup view</span>
+          <span class="legend-item"><i class="swatch view"></i>View</span>
+          <span class="legend-item"><i class="swatch agent"></i>Agent</span>
+          <span class="legend-item"><i class="swatch script_library"></i>Script lib</span>
+        </div>
+        <div class="legend-row legend-issues" aria-label="Code issue severity">
+          <span class="legend-divider" aria-hidden="true"></span>
+          <span class="legend-item legend-issue"><span class="legend-dot" aria-hidden="true">🔴</span> Critical/High issue open</span>
+          <span class="legend-item legend-issue"><span class="legend-dot" aria-hidden="true">🟡</span> Medium/Low issue open</span>
+        </div>
       </div>
       <p class="caption" id="graphCaption">1-hop neighborhood · Click node for details · Use Lookup Matrix for the full picture</p>
     </section>

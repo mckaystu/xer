@@ -144,6 +144,11 @@ RULE_CATALOG: dict[str, dict[str, str]] = {
         "category": "Performance & NIF Indexing",
         "default_severity": "MEDIUM",
     },
+    "PERF-004": {
+        "title": "O(n\u00b2) GetNthDocument/GetNthEntry Iteration",
+        "category": "Performance & NIF Indexing",
+        "default_severity": "HIGH",
+    },
     "DOM-BS-001": {
         "title": "Uncovered Handle Leak (AI Blind Spot)",
         "category": "AI Discrepancy & Blind Spots",

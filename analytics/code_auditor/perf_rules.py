@@ -1,4 +1,4 @@
-"""Performance & NIF indexing anti-pattern detectors (PERF-001..003)."""
+"""Performance & NIF indexing anti-pattern detectors (PERF-001..004)."""
 
 from __future__ import annotations
 
@@ -59,6 +59,13 @@ RE_GETVIEW_IN_LOOP = re.compile(
     re.I | re.X,
 )
 RE_GETVIEW_CALL = re.compile(r"\.\s*(?:[Gg]et[Vv]iew)\s*\(", re.I)
+RE_GETNTH_IN_LOOP = re.compile(
+    r"""(?:for|while|Do\s+While|Do\s+Until|For\s+)[\s\S]{0,40}
+        (?:[\s\S](?!\b(?:Next|Wend|Loop|End\s+For)\b)){0,900}?
+        \.\s*(?:[Gg]et[Nn]th(?:Document|Entry))\s*\(""",
+    re.I | re.X,
+)
+RE_GETNTH_CALL = re.compile(r"\.\s*(?:[Gg]et[Nn]th(?:Document|Entry))\s*\(", re.I)
 RE_SAVE_IN_LOOP = re.compile(
     r"""(?:for|while|Do\s+While|Do\s+Until|For\s+)[\s\S]{0,40}
         (?:[\s\S](?!\b(?:Next|Wend|Loop|End\s+For)\b)){0,1200}?
@@ -176,8 +183,47 @@ def detect_perf003(unit: CodeUnit) -> list[Finding]:
     ]
 
 
+def detect_perf004(unit: CodeUnit) -> list[Finding]:
+    """GetNthDocument / GetNthEntry inside a counted loop (O(n²) re-walk)."""
+    match = RE_GETNTH_IN_LOOP.search(unit.body)
+    if not match:
+        # Fallback: multiple GetNth* calls + a loop
+        if not RE_LOOP.search(unit.body):
+            return []
+        calls = list(RE_GETNTH_CALL.finditer(unit.body))
+        if len(calls) < 2:
+            return []
+        match = calls[0]
+    line = _line_of(unit.body, match.start(), unit.start_line)
+    return [
+        _finding(
+            "PERF-004",
+            unit,
+            line=line,
+            evidence=_snippet(unit.body, match.start()),
+            confidence=84,
+            impact=(
+                "PERF-004: GetNthDocument/GetNthEntry re-walks the collection from "
+                "the start on every call. Inside a loop this is O(n²) — a few thousand "
+                "documents can hang the agent or exceed the HTTP task timeout. Use "
+                "GetFirstDocument/GetNextDocument (or GetFirstEntry/GetNextEntry) instead."
+            ),
+            remediation=remediation_template("PERF-004", unit.language),
+            action=(
+                "Replace GetNthDocument(i)/GetNthEntry(i) inside the loop with a "
+                "GetFirstDocument/GetNextDocument (or GetFirstEntry/GetNextEntry) walk "
+                "that advances a single handle instead of re-indexing from zero."
+            ),
+            handle_lifecycle_warning=(
+                f"Line {line}: GetNthDocument/GetNthEntry inside a loop — O(n²) collection walk."
+            ),
+        )
+    ]
+
+
 PERF_DETECTORS = [
     detect_perf001,
     detect_perf002,
     detect_perf003,
+    detect_perf004,
 ]

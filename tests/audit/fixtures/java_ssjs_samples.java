@@ -225,6 +225,33 @@ public void saveLoop(DocumentCollection coll) throws NotesException {
 // --- end ---
 
 // =============================================================================
+// @case id=perf004_getnth_loop
+// @expect PERF-004
+// @lang java
+// =============================================================================
+// --- begin ---
+public void getNthLoop(DocumentCollection coll) throws NotesException {
+  int count = coll.getCount();
+  for (int i = 1; i <= count; i++) {
+    Document doc = coll.getNthDocument(i);
+    String id = doc.getNoteID();
+  }
+}
+// --- end ---
+
+// =============================================================================
+// @case id=perf004_getnth_no_loop_ok
+// @forbid PERF-004
+// @lang java
+// =============================================================================
+// --- begin ---
+public void getNthOnce(DocumentCollection coll) throws NotesException {
+  Document doc = coll.getNthDocument(1);
+  String id = doc.getNoteID();
+}
+// --- end ---
+
+// =============================================================================
 // @case id=java_inventory_protected
 // @forbid DOM-002
 // @lang java

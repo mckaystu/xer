@@ -102,16 +102,22 @@ let currentAnalysis = null;
 let currentCodeAudit = null;
 let currentFunctionInventory = null;
 let auditFindingFilter = "all"; // all | verified | false_positive | blind_spot | handle | performance | ai_discovered
+let pendingDeepDive = null; // { kind: "finding"|"inventory", idx: number } | null
 let fullGraph = null;
 let activeView = "focus";
 let focusNodeId = null;
 let focusTargetId = null;
+
+const SEVERITY_RANK = { CRITICAL: 4, HIGH: 3, MEDIUM: 2, LOW: 1 };
+const SEVERITY_DOT = { CRITICAL: "🔴", HIGH: "🔴", MEDIUM: "🟡", LOW: "🟡" };
+const SEVERITY_SHADOW = { CRITICAL: "#f0a0a0", HIGH: "#f0b080" };
 
 const graphSelect = document.getElementById("graphSelect");
 const edgeFilter = document.getElementById("edgeFilter");
 const focusSelect = document.getElementById("focusSelect");
 const layoutDirection = document.getElementById("layoutDirection");
 const aggregateEdges = document.getElementById("aggregateEdges");
+const issuesOnly = document.getElementById("issuesOnly");
 const detailPanel = document.getElementById("detailPanel");
 const refreshBtn = document.getElementById("refreshBtn");
 const zoomInBtn = document.getElementById("zoomInBtn");
@@ -158,6 +164,58 @@ function showError(msg) {
 
 function truncateLabel(label, max = 32) {
   return label.length > max ? label.slice(0, max - 1) + "…" : label;
+}
+
+function maxSeverity(a, b) {
+  const ra = SEVERITY_RANK[a] || 0;
+  const rb = SEVERITY_RANK[b] || 0;
+  return ra >= rb ? a : b;
+}
+
+/** Map vis-network node id → open code issues from audit + inventory. */
+function computeNodeIssues() {
+  const map = new Map();
+
+  const bump = (nodeId, item) => {
+    if (!nodeId) return;
+    let entry = map.get(nodeId);
+    if (!entry) {
+      entry = { maxSeverity: item.severity || "LOW", count: 0, items: [] };
+      map.set(nodeId, entry);
+    }
+    entry.count += 1;
+    entry.items.push(item);
+    entry.maxSeverity = maxSeverity(entry.maxSeverity, item.severity || "LOW");
+  };
+
+  const findings = currentCodeAudit?.findings || [];
+  findings.forEach((finding, idx) => {
+    if (finding.is_false_positive) return;
+    const et = finding.element_type || "";
+    const en = finding.element_name || "";
+    if (!et || !en) return;
+    bump(`${et}:${en}`, {
+      kind: "finding",
+      idx,
+      severity: finding.severity || "MEDIUM",
+      label: finding.title || finding.issue || finding.rule_id || "Finding",
+    });
+  });
+
+  const inventory = currentFunctionInventory?.inventory || [];
+  inventory.forEach((row, idx) => {
+    if (row.status !== "UNPROTECTED_ALLOCATION") return;
+    const nodeId = row.design_element;
+    if (!nodeId) return;
+    bump(nodeId, {
+      kind: "inventory",
+      idx,
+      severity: row.risk_severity || row.severity || "LOW",
+      label: `${row.function_name || "function"} — unprotected allocation`,
+    });
+  });
+
+  return map;
 }
 
 function nodeName(nodeId) {
@@ -296,6 +354,8 @@ function buildNetwork() {
   const direction = layoutDirection.value;
   const isHorizontal = direction === "LR";
   const isFocus = activeView === "focus";
+  const nodeIssues = computeNodeIssues();
+  const onlyIssues = Boolean(issuesOnly?.checked);
 
   const rawEdges = getFilteredEdges();
   const edges = aggregateEdgeList(rawEdges);
@@ -313,17 +373,43 @@ function buildNetwork() {
   } else {
     visibleNodes = currentViz.nodes.filter((n) => !filter || connected.has(n.id));
   }
+  if (onlyIssues) {
+    visibleNodes = visibleNodes.filter((n) => nodeIssues.has(n.id));
+  }
 
   const nodes = new vis.DataSet(
-    visibleNodes.map((n) => ({
-      id: n.id,
-      label: truncateLabel(n.label),
-      title: `${n.label}\nType: ${n.group}\nFields: ${n.fieldCount || 0}`,
-      group: n.group,
-      level: nodeLevel(n.group, filter, isFocus),
-      widthConstraint: { minimum: 90, maximum: 200 },
-      borderWidth: n.id === focusNodeId ? 3 : 2,
-    }))
+    visibleNodes.map((n) => {
+      const issue = nodeIssues.get(n.id);
+      const baseBorder = n.id === focusNodeId ? 3 : 2;
+      const borderWidth = Math.max(baseBorder, issue ? 3 : 2);
+      let label = truncateLabel(n.label);
+      let title = `${n.label}\nType: ${n.group}\nFields: ${n.fieldCount || 0}`;
+      const nodeOpts = {
+        id: n.id,
+        label,
+        title,
+        group: n.group,
+        level: nodeLevel(n.group, filter, isFocus),
+        widthConstraint: { minimum: 90, maximum: 200 },
+        borderWidth,
+      };
+      if (issue) {
+        const sev = issue.maxSeverity || "LOW";
+        const dot = SEVERITY_DOT[sev] || "🟡";
+        nodeOpts.label = `${dot} ${issue.count}  ${truncateLabel(n.label)}`;
+        nodeOpts.title = `${title}\nIssues: ${issue.count} (${sev})`;
+        if (sev === "CRITICAL" || sev === "HIGH") {
+          nodeOpts.shadow = {
+            enabled: true,
+            color: SEVERITY_SHADOW[sev] || "#f0a0a0",
+            size: 12,
+            x: 0,
+            y: 0,
+          };
+        }
+      }
+      return nodeOpts;
+    })
   );
 
   const edgeData = new vis.DataSet(
@@ -476,13 +562,22 @@ function buildLookupMatrix() {
   const maxCell = Math.max(1, ...cells.values());
 
   let html = "<thead><tr><th class='corner'>Form ↓ / Lookup view →</th>";
+  const nodeIssues = computeNodeIssues();
   cols.forEach(([viewId, total]) => {
-    html += `<th class="col-header" title="${nodeName(viewId)} (${total})">${truncateLabel(nodeName(viewId), 18)}</th>`;
+    const issue = nodeIssues.get(viewId);
+    const dot = issue ? `${SEVERITY_DOT[issue.maxSeverity] || "🟡"} ` : "";
+    html += `<th class="col-header" title="${nodeName(viewId)} (${total})${
+      issue ? ` · Issues: ${issue.count} (${issue.maxSeverity})` : ""
+    }">${dot}${truncateLabel(nodeName(viewId), 18)}</th>`;
   });
   html += "<th class='row-total'>Total</th></tr></thead><tbody>";
 
   rows.forEach(([formId, rowTotal]) => {
-    html += `<tr><th class="row-header" data-form="${formId}" title="${nodeName(formId)}">${truncateLabel(nodeName(formId), 24)}</th>`;
+    const formIssue = nodeIssues.get(formId);
+    const formDot = formIssue ? `${SEVERITY_DOT[formIssue.maxSeverity] || "🟡"} ` : "";
+    html += `<tr><th class="row-header" data-form="${formId}" title="${nodeName(formId)}${
+      formIssue ? ` · Issues: ${formIssue.count} (${formIssue.maxSeverity})` : ""
+    }">${formDot}${truncateLabel(nodeName(formId), 24)}</th>`;
     cols.forEach(([viewId]) => {
       const count = cells.get(`${formId}|${viewId}`) || 0;
       const intensity = count ? Math.ceil((count / maxCell) * 4) : 0;
@@ -928,25 +1023,28 @@ function renderInventoryDeepDive(fn) {
   `;
 }
 
+function openInventoryDeepDive(idx) {
+  const section = document.getElementById("functionInventorySection");
+  const dive = document.getElementById("inventoryDeepDive");
+  if (!section || !dive || !currentFunctionInventory?.inventory?.length) return;
+  const fn = currentFunctionInventory.inventory[idx];
+  if (!fn) return;
+  dive.innerHTML = renderInventoryDeepDive(fn);
+  dive.classList.remove("hidden");
+  document.getElementById("inventoryDeepDiveClose")?.addEventListener("click", () => {
+    dive.classList.add("hidden");
+    dive.innerHTML = "";
+  });
+  dive.scrollIntoView({ behavior: "smooth", block: "nearest" });
+}
+
 function wireInventoryDeepDive() {
   const section = document.getElementById("functionInventorySection");
   const dive = document.getElementById("inventoryDeepDive");
   if (!section || !dive || !currentFunctionInventory?.inventory?.length) return;
 
-  const openFn = (idx) => {
-    const fn = currentFunctionInventory.inventory[idx];
-    if (!fn) return;
-    dive.innerHTML = renderInventoryDeepDive(fn);
-    dive.classList.remove("hidden");
-    document.getElementById("inventoryDeepDiveClose")?.addEventListener("click", () => {
-      dive.classList.add("hidden");
-      dive.innerHTML = "";
-    });
-    dive.scrollIntoView({ behavior: "smooth", block: "nearest" });
-  };
-
   section.querySelectorAll(".inventory-row").forEach((row) => {
-    const handler = () => openFn(Number(row.dataset.inventoryIdx));
+    const handler = () => openInventoryDeepDive(Number(row.dataset.inventoryIdx));
     row.addEventListener("click", handler);
     row.addEventListener("keydown", (e) => {
       if (e.key === "Enter" || e.key === " ") {
@@ -1182,6 +1280,15 @@ function renderCodeAnalysis() {
   wireCodeAuditDeepDive();
   wireAuditFindingFilters();
   wireAiValidationButton();
+  if (pendingDeepDive) {
+    const pending = pendingDeepDive;
+    pendingDeepDive = null;
+    // Defer so DOM from wire* is ready
+    requestAnimationFrame(() => {
+      if (pending.kind === "inventory") openInventoryDeepDive(pending.idx);
+      else if (pending.kind === "finding") openAuditDeepDive(pending.idx);
+    });
+  }
 }
 
 function renderAsIsSnippet(finding) {
@@ -1266,25 +1373,28 @@ function renderAuditDeepDive(finding) {
   `;
 }
 
+function openAuditDeepDive(idx) {
+  const section = document.getElementById("codeAuditSection");
+  const dive = document.getElementById("auditDeepDive");
+  if (!section || !dive || !currentCodeAudit?.findings?.length) return;
+  const finding = currentCodeAudit.findings[idx];
+  if (!finding) return;
+  dive.innerHTML = renderAuditDeepDive(finding);
+  dive.classList.remove("hidden");
+  document.getElementById("auditDeepDiveClose")?.addEventListener("click", () => {
+    dive.classList.add("hidden");
+    dive.innerHTML = "";
+  });
+  dive.scrollIntoView({ behavior: "smooth", block: "nearest" });
+}
+
 function wireCodeAuditDeepDive() {
   const section = document.getElementById("codeAuditSection");
   const dive = document.getElementById("auditDeepDive");
   if (!section || !dive || !currentCodeAudit?.findings?.length) return;
 
-  const openFinding = (idx) => {
-    const finding = currentCodeAudit.findings[idx];
-    if (!finding) return;
-    dive.innerHTML = renderAuditDeepDive(finding);
-    dive.classList.remove("hidden");
-    document.getElementById("auditDeepDiveClose")?.addEventListener("click", () => {
-      dive.classList.add("hidden");
-      dive.innerHTML = "";
-    });
-    dive.scrollIntoView({ behavior: "smooth", block: "nearest" });
-  };
-
   section.querySelectorAll(".audit-row").forEach((row) => {
-    const handler = () => openFinding(Number(row.dataset.findingIdx));
+    const handler = () => openAuditDeepDive(Number(row.dataset.findingIdx));
     row.addEventListener("click", handler);
     row.addEventListener("keydown", (e) => {
       if (e.key === "Enter" || e.key === " ") {
@@ -1459,6 +1569,9 @@ async function loadSummary(graphId) {
     if (activeView === "overview") renderOverview(currentSummary);
     if (activeView === "code") renderCodeAnalysis();
     if (activeView === "rules") renderRulesCatalog();
+    // Rebuild graph badges if Focus / Full Graph was opened before audit finished
+    if (activeView === "focus" || activeView === "graph") buildNetwork();
+    if (activeView === "matrix") buildLookupMatrix();
   } catch (err) {
     currentSummary = null;
     currentAnalysis = null;
@@ -1505,6 +1618,7 @@ function setActiveView(view) {
   edgeFilterLabel.classList.toggle("hidden", hideGraph);
   layoutLabel.classList.toggle("hidden", hideGraph);
   aggregateLabel.classList.toggle("hidden", hideGraph);
+  document.getElementById("issuesOnlyLabel")?.classList.toggle("hidden", hideGraph);
   zoomControls.classList.toggle("hidden", hideGraph);
 
   if (isOverview) {
@@ -1739,6 +1853,24 @@ function showNodeDetail(nodeId) {
     ? `<h3>Relationships (${related.length})</h3><ul class="edge-list">${typeSummary}</ul>`
     : "";
 
+  const issueEntry = computeNodeIssues().get(nodeId);
+  let issuesHtml = "";
+  if (issueEntry?.items?.length) {
+    const rows = issueEntry.items
+      .map(
+        (item, i) => `
+      <li class="code-issue-row">
+        <span class="sev-pill sev-${escapeHtml(item.severity || "LOW")}">${escapeHtml(item.severity || "LOW")}</span>
+        <span class="code-issue-label">${escapeHtml(item.label || "")}</span>
+        <button type="button" class="btn-view-fix" data-issue-kind="${escapeHtml(item.kind)}" data-issue-idx="${item.idx}">View fix →</button>
+      </li>`
+      )
+      .join("");
+    issuesHtml = `
+      <h3>Code Issues (${issueEntry.count} · ${escapeHtml(issueEntry.maxSeverity)})</h3>
+      <ul class="code-issue-list">${rows}</ul>`;
+  }
+
   const focusBtn =
     activeView !== "matrix"
       ? `<button type="button" class="btn-focus" data-focus="${nodeId}">Focus on this</button>`
@@ -1755,6 +1887,7 @@ function showNodeDetail(nodeId) {
     ${focusBtn}
     ${fieldsHtml}
     ${logicHtml}
+    ${issuesHtml}
     ${edgesHtml}
   `;
 
@@ -1763,6 +1896,15 @@ function showNodeDetail(nodeId) {
     focusTargetId = null;
     focusSelect.value = nodeId;
     setActiveView("focus");
+  });
+  detailPanel.querySelectorAll(".btn-view-fix").forEach((btn) => {
+    btn.addEventListener("click", () => {
+      pendingDeepDive = {
+        kind: btn.dataset.issueKind === "inventory" ? "inventory" : "finding",
+        idx: Number(btn.dataset.issueIdx),
+      };
+      setActiveView("code");
+    });
   });
   wireFieldSearch();
 }
@@ -1803,7 +1945,8 @@ async function loadSelectedGraph() {
   auditFindingFilter = "all";
   syncEdgeFilterForGraph();
   populateFocusSelect();
-  loadSummary(id).catch(() => {});
+  // Fetch audit/inventory so Focus/Full Graph badges work without visiting Overview first
+  const summaryPromise = loadSummary(id);
   if (activeView === "overview" || activeView === "rules" || activeView === "code") {
     /* render when summary/analysis returns */
   } else if (activeView === "matrix") {
@@ -1811,6 +1954,7 @@ async function loadSelectedGraph() {
   } else {
     buildNetwork();
   }
+  await summaryPromise.catch(() => {});
   const edgeTypes = [...new Set((viz.edges || []).map((e) => e.type))];
   detailPanel.innerHTML = `
     <h2>${viz.database_title || "Application"}</h2>
@@ -1837,6 +1981,7 @@ focusSelect.addEventListener("change", () => {
 });
 layoutDirection.addEventListener("change", () => buildNetwork());
 aggregateEdges.addEventListener("change", () => buildNetwork());
+issuesOnly?.addEventListener("change", () => buildNetwork());
 matrixHideEmpty.addEventListener("change", () => buildLookupMatrix());
 zoomInBtn.addEventListener("click", () => network?.moveTo({ scale: network.getScale() * 1.25, animation: true }));
 zoomOutBtn.addEventListener("click", () => network?.moveTo({ scale: network.getScale() * 0.8, animation: true }));

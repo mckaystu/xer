@@ -1,4 +1,4 @@
-"""Performance & NIF anti-pattern regression tests (PERF-001..003)."""
+"""Performance & NIF anti-pattern regression tests (PERF-001..004)."""
 
 from __future__ import annotations
 
@@ -10,7 +10,7 @@ from tests.audit.conftest import FixtureCase, case_to_unit, rule_ids
 
 class TestPerfCatalog:
     def test_perf_rules_registered(self):
-        for rid in ("PERF-001", "PERF-002", "PERF-003"):
+        for rid in ("PERF-001", "PERF-002", "PERF-003", "PERF-004"):
             assert rid in RULE_CATALOG
             assert RULE_CATALOG[rid]["category"] == "Performance & NIF Indexing"
 
@@ -22,6 +22,7 @@ class TestPerfLotusScript:
             ("ls_perf001_no_autoupdate", "PERF-001"),
             ("ls_perf002_getview_loop", "PERF-002"),
             ("ls_perf003_save_loop", "PERF-003"),
+            ("ls_perf004_getnth_loop", "PERF-004"),
         ],
     )
     def test_positive(self, ls_cases_by_id: dict[str, FixtureCase], case_id: str, rule: str):
@@ -32,6 +33,10 @@ class TestPerfLotusScript:
         hit = rule_ids(case_to_unit(ls_cases_by_id["ls_perf001_ok"]))
         assert "PERF-001" not in hit
 
+    def test_getnth_outside_loop_suppresses_perf004(self, ls_cases_by_id: dict[str, FixtureCase]):
+        hit = rule_ids(case_to_unit(ls_cases_by_id["ls_perf004_getnth_no_loop_ok"]))
+        assert "PERF-004" not in hit
+
 
 class TestPerfJava:
     @pytest.mark.parametrize(
@@ -40,6 +45,7 @@ class TestPerfJava:
             ("perf001_no_autoupdate", "PERF-001"),
             ("perf002_getview_loop", "PERF-002"),
             ("perf003_save_loop", "PERF-003"),
+            ("perf004_getnth_loop", "PERF-004"),
         ],
     )
     def test_positive(self, java_cases_by_id: dict[str, FixtureCase], case_id: str, rule: str):
@@ -49,6 +55,10 @@ class TestPerfJava:
     def test_autoupdate_false_suppresses_perf001(self, java_cases_by_id: dict[str, FixtureCase]):
         hit = rule_ids(case_to_unit(java_cases_by_id["perf001_ok"]))
         assert "PERF-001" not in hit
+
+    def test_getnth_outside_loop_suppresses_perf004(self, java_cases_by_id: dict[str, FixtureCase]):
+        hit = rule_ids(case_to_unit(java_cases_by_id["perf004_getnth_no_loop_ok"]))
+        assert "PERF-004" not in hit
 
     def test_perf_findings_include_impact_callout(self, java_cases_by_id: dict[str, FixtureCase]):
         from analytics.code_auditor.rules import run_rule_engine

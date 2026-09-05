@@ -42,6 +42,29 @@ class TestInventoryClassification:
         assert _status_for(unit, "walk") == "UNPROTECTED_ALLOCATION"
         assert "recycle" not in unit.body
 
+    def test_getnth_only_counts_as_allocating(self):
+        """GetNthDocument alone (no GetFirst/GetNext) still allocates a handle."""
+        unit = CodeUnit(
+            source_file="t.dxl",
+            element_name="NthOnly",
+            element_type="agent",
+            language="lotusscript",
+            event=None,
+            body=(
+                "Function PickFirst(coll As NotesDocumentCollection) As String\n"
+                "  Dim doc As NotesDocument\n"
+                "  Set doc = coll.GetNthDocument(1)\n"
+                "  PickFirst = doc.NoteID\n"
+                "End Function\n"
+            ),
+        )
+        recs = build_inventory([unit])
+        assert recs
+        match = [r for r in recs if r.function_name == "PickFirst"]
+        assert match
+        assert match[0].allocates_handles is True
+        assert match[0].status != "SAFE_NO_HANDLES"
+
 
 class TestInventorySummaryMetrics:
     def test_summarize_rates(self, ls_cases_by_id: dict[str, FixtureCase]):

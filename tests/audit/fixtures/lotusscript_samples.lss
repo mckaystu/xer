@@ -204,6 +204,33 @@ Sub LsPerf003SaveLoop
 End Sub
 
 ' =============================================================================
+' @case id=ls_perf004_getnth_loop
+' @expect PERF-004
+' =============================================================================
+Sub LsPerf004GetNthLoop
+  Dim i As Integer
+  Dim doc As NotesDocument
+  Dim coll As NotesDocumentCollection
+  Set coll = db.AllDocuments
+  For i = 1 To coll.Count
+    Set doc = coll.GetNthDocument(i)
+    Print doc.NoteID
+  Next
+End Sub
+
+' =============================================================================
+' @case id=ls_perf004_getnth_no_loop_ok
+' @forbid PERF-004
+' =============================================================================
+Sub LsPerf004GetNthNoLoopOk
+  Dim doc As NotesDocument
+  Dim coll As NotesDocumentCollection
+  Set coll = db.AllDocuments
+  Set doc = coll.GetNthDocument(1)
+  Print doc.NoteID
+End Sub
+
+' =============================================================================
 ' @case id=ls_inventory_protected
 ' @forbid LS-DOM-001
 ' =============================================================================

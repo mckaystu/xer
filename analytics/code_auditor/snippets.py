@@ -117,6 +117,10 @@ PROBLEM_BREAKDOWNS: dict[str, str] = {
     "PERF-003": (
         "doc.save / doc.Save runs on every collection iteration without batching — high I/O and log bloat."
     ),
+    "PERF-004": (
+        "GetNthDocument / GetNthEntry inside a counted loop re-walks the collection from the start "
+        "on every call — O(n²) that can hang agents or exceed HTTP task timeouts."
+    ),
     "DOM-BS-002": (
         "AI cross-module analysis found a Document/NotesDocument passed or returned across functions "
         "where neither caller nor callee clearly owns recycle/Delete."
@@ -232,6 +236,16 @@ REMEDIATION_GUIDES: dict[str, dict[str, str]] = {
     "PERF-003": {
         "lotusscript": "Avoid Save on every iteration when possible; batch updates or checkpoint periodically.",
         "java": "Avoid doc.save() every iteration; batch or throttle writes.",
+    },
+    "PERF-004": {
+        "lotusscript": (
+            "Replace `GetNthDocument(i)` / `GetNthEntry(i)` in a For loop with "
+            "`GetFirstDocument` / `GetNextDocument` (or Entry equivalents)."
+        ),
+        "java": (
+            "Replace `getNthDocument(i)` / `getNthEntry(i)` in a for-loop with "
+            "`getFirstDocument` / `getNextDocument` (or Entry equivalents)."
+        ),
     },
     "DOM-BS-002": {
         "lotusscript": "Document ownership: either callee Deletes before return, or caller Deletes after use — never neither.",
@@ -655,6 +669,23 @@ def remediation_template(
             "    Set doc = coll.GetNextDocument(doc)\n"
             "Loop"
         ),
+        "PERF-004": (
+            "' BAD — O(n²): each GetNthDocument re-walks from the start\n"
+            "' For i = 1 To coll.Count\n"
+            "'     Set doc = coll.GetNthDocument(i)\n"
+            "' Next\n"
+            "\n"
+            "' GOOD — O(n) sequential walk\n"
+            "Dim doc As NotesDocument\n"
+            "Dim nextDoc As NotesDocument\n"
+            "Set doc = coll.GetFirstDocument()\n"
+            "Do While Not doc Is Nothing\n"
+            "    Set nextDoc = coll.GetNextDocument(doc)\n"
+            "    ' ... process doc ...\n"
+            "    Delete doc\n"
+            "    Set doc = nextDoc\n"
+            "Loop"
+        ),
         "DOM-014": (
             "Dim item As NotesItem\n"
             "Set item = doc.GetFirstItem(\"Subject\")\n"
@@ -881,6 +912,24 @@ def remediation_template(
             "  if (++n % 50 == 0) doc.save(true, false); // example throttle\n"
             "  Document next = coll.getNextDocument(doc);\n"
             "  doc.recycle();\n"
+            "  doc = next;\n"
+            "}"
+        ),
+        "PERF-004": (
+            "// BAD — O(n²): getNthDocument re-walks from index 0 each time\n"
+            "// for (int i = 1; i <= coll.getCount(); i++) {\n"
+            "//   Document doc = coll.getNthDocument(i);\n"
+            "// }\n"
+            "\n"
+            "// GOOD — O(n) sequential walk\n"
+            "Document doc = coll.getFirstDocument();\n"
+            "while (doc != null) {\n"
+            "  Document next = coll.getNextDocument(doc);\n"
+            "  try {\n"
+            "    // ... process doc ...\n"
+            "  } finally {\n"
+            "    doc.recycle();\n"
+            "  }\n"
             "  doc = next;\n"
             "}"
         ),

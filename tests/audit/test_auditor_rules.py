@@ -59,8 +59,8 @@ class TestLotusScriptHandleRules:
     def test_annotation_contracts(self, lotusscript_cases: list[FixtureCase]):
         """Every LS fixture case honors its @expect / @forbid tags for handle rules."""
         for case in lotusscript_cases:
-            expect = case.expect - {"PERF-001", "PERF-002", "PERF-003"}
-            forbid = case.forbid - {"PERF-001", "PERF-002", "PERF-003"}
+            expect = case.expect - {"PERF-001", "PERF-002", "PERF-003", "PERF-004"}
+            forbid = case.forbid - {"PERF-001", "PERF-002", "PERF-003", "PERF-004"}
             if not expect and not forbid:
                 continue
             hit = rule_ids(case_to_unit(case))
@@ -116,8 +116,8 @@ class TestJavaHandleRules:
 
     def test_annotation_contracts(self, java_cases: list[FixtureCase]):
         for case in java_cases:
-            expect = case.expect - {"PERF-001", "PERF-002", "PERF-003"}
-            forbid = case.forbid - {"PERF-001", "PERF-002", "PERF-003"}
+            expect = case.expect - {"PERF-001", "PERF-002", "PERF-003", "PERF-004"}
+            forbid = case.forbid - {"PERF-001", "PERF-002", "PERF-003", "PERF-004"}
             if not expect and not forbid:
                 continue
             hit = rule_ids(case_to_unit(case))
