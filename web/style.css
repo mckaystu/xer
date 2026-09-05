@@ -517,9 +517,12 @@ button:hover {
 }
 
 .legend-issue .legend-dot {
-  font-size: 0.75rem;
+  font-size: 0.85rem;
   line-height: 1;
+  font-weight: 700;
 }
+.legend-issue .legend-dot.sev-CRITICAL { color: #f0a0a0; }
+.legend-issue .legend-dot.sev-MEDIUM { color: #e0c860; }
 
 .swatch {
   display: inline-block;

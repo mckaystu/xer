@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>Xer — DXL Graph Explorer</title>
   <script src="https://unpkg.com/vis-network@9.1.9/standalone/umd/vis-network.min.js"></script>
-  <link rel="stylesheet" href="/static/style.css" />
+  <link rel="stylesheet" href="/static/style.css?v=20260905b" />
 </head>
 <body>
   <header class="header">
@@ -126,8 +126,8 @@
         </div>
         <div class="legend-row legend-issues" aria-label="Code issue severity">
           <span class="legend-divider" aria-hidden="true"></span>
-          <span class="legend-item legend-issue"><span class="legend-dot" aria-hidden="true">🔴</span> Critical/High issue open</span>
-          <span class="legend-item legend-issue"><span class="legend-dot" aria-hidden="true">🟡</span> Medium/Low issue open</span>
+          <span class="legend-item legend-issue"><span class="legend-dot sev-CRITICAL" aria-hidden="true">●</span> Critical/High issue</span>
+          <span class="legend-item legend-issue"><span class="legend-dot sev-MEDIUM" aria-hidden="true">◐</span> Medium/Low issue</span>
         </div>
       </div>
       <p class="caption" id="graphCaption">1-hop neighborhood · Click node for details · Use Lookup Matrix for the full picture</p>
@@ -152,6 +152,6 @@
     </aside>
   </main>
 
-  <script src="/static/app.js"></script>
+  <script src="/static/app.js?v=20260905b"></script>
 </body>
 </html>

@@ -109,7 +109,15 @@ let focusNodeId = null;
 let focusTargetId = null;
 
 const SEVERITY_RANK = { CRITICAL: 4, HIGH: 3, MEDIUM: 2, LOW: 1 };
+// Canvas-safe markers (vis-network's canvas renderer often drops emoji)
+const SEVERITY_MARK = { CRITICAL: "●", HIGH: "●", MEDIUM: "◐", LOW: "○" };
 const SEVERITY_DOT = { CRITICAL: "🔴", HIGH: "🔴", MEDIUM: "🟡", LOW: "🟡" };
+const SEVERITY_BORDER = {
+  CRITICAL: "#f0a0a0",
+  HIGH: "#f0b080",
+  MEDIUM: "#e0c860",
+  LOW: "#8ee08c",
+};
 const SEVERITY_SHADOW = { CRITICAL: "#f0a0a0", HIGH: "#f0b080" };
 
 const graphSelect = document.getElementById("graphSelect");
@@ -382,6 +390,8 @@ function buildNetwork() {
       const issue = nodeIssues.get(n.id);
       const baseBorder = n.id === focusNodeId ? 3 : 2;
       const borderWidth = Math.max(baseBorder, issue ? 3 : 2);
+      const groupStyle = NETWORK_GROUPS[n.group] || {};
+      const groupColor = groupStyle.color || {};
       let label = truncateLabel(n.label);
       let title = `${n.label}\nType: ${n.group}\nFields: ${n.fieldCount || 0}`;
       const nodeOpts = {
@@ -390,19 +400,29 @@ function buildNetwork() {
         title,
         group: n.group,
         level: nodeLevel(n.group, filter, isFocus),
-        widthConstraint: { minimum: 90, maximum: 200 },
+        widthConstraint: { minimum: 90, maximum: 220 },
         borderWidth,
       };
       if (issue) {
         const sev = issue.maxSeverity || "LOW";
-        const dot = SEVERITY_DOT[sev] || "🟡";
-        nodeOpts.label = `${dot} ${issue.count}  ${truncateLabel(n.label)}`;
+        const mark = SEVERITY_MARK[sev] || "○";
+        // Prefix is ASCII-safe for vis-network canvas text; count is the main signal
+        nodeOpts.label = `${mark}${issue.count} ${truncateLabel(n.label, 28)}`;
         nodeOpts.title = `${title}\nIssues: ${issue.count} (${sev})`;
+        const border = SEVERITY_BORDER[sev] || "#f0a0a0";
+        nodeOpts.color = {
+          background: groupColor.background || "#2a2a2a",
+          border,
+          highlight: {
+            background: (groupColor.highlight && groupColor.highlight.background) || groupColor.background || "#3a3a3a",
+            border,
+          },
+        };
         if (sev === "CRITICAL" || sev === "HIGH") {
           nodeOpts.shadow = {
             enabled: true,
             color: SEVERITY_SHADOW[sev] || "#f0a0a0",
-            size: 12,
+            size: 18,
             x: 0,
             y: 0,
           };
@@ -515,19 +535,26 @@ function buildNetwork() {
 }
 
 function updateCaption() {
+  const issueNodes = computeNodeIssues().size;
+  const issueNote =
+    issueNodes > 0
+      ? ` · ${issueNodes} design element${issueNodes === 1 ? "" : "s"} with code issues`
+      : currentCodeAudit || currentFunctionInventory
+        ? " · no open code issues on this graph"
+        : " · loading code issues…";
   if (activeView === "focus" && focusNodeId) {
     const name = nodeName(focusNodeId);
     const edgeCount = getFilteredEdges().length;
     const aggCount = aggregateEdgeList(getFilteredEdges()).length;
     const suffix = focusTargetId ? ` → ${nodeName(focusTargetId)}` : "";
-    graphCaption.textContent = `Focus: ${name}${suffix} · ${edgeCount} refs · ${aggCount} edges shown`;
+    graphCaption.textContent = `Focus: ${name}${suffix} · ${edgeCount} refs · ${aggCount} edges shown${issueNote}`;
   } else if (activeView === "graph") {
     const filter = edgeFilter.value;
     const edgeCount = getFilteredEdges().length;
     if (!edgeCount && filter) {
       graphCaption.textContent = `No “${filter}” edges in this graph — switch Relationships to All types`;
     } else {
-      graphCaption.textContent = `Full graph · ${edgeCount} edges shown · use filters to reduce noise`;
+      graphCaption.textContent = `Full graph · ${edgeCount} edges shown${issueNote}`;
     }
   }
 }
@@ -1945,16 +1972,15 @@ async function loadSelectedGraph() {
   auditFindingFilter = "all";
   syncEdgeFilterForGraph();
   populateFocusSelect();
-  // Fetch audit/inventory so Focus/Full Graph badges work without visiting Overview first
-  const summaryPromise = loadSummary(id);
+  // Await audit/inventory BEFORE first graph paint so badges are present immediately
+  await loadSummary(id).catch(() => {});
   if (activeView === "overview" || activeView === "rules" || activeView === "code") {
-    /* render when summary/analysis returns */
+    /* already rendered inside loadSummary when applicable */
   } else if (activeView === "matrix") {
     buildLookupMatrix();
   } else {
     buildNetwork();
   }
-  await summaryPromise.catch(() => {});
   const edgeTypes = [...new Set((viz.edges || []).map((e) => e.type))];
   detailPanel.innerHTML = `
     <h2>${viz.database_title || "Application"}</h2>
