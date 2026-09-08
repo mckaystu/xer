@@ -104,6 +104,8 @@ Catalog lives in `analytics/code_auditor/models.py`. Detectors: `rules.py`, `ls_
 
 Primary Handle Exhaustion inventory covers **Java / SSJS / XPages** only (`handle_exhaustion_scope: java_javascript_xpages`). LotusScript units are skipped (`lotus_script_units_skipped`).
 
+SSJS script libraries in DXL are often stored as `$ServerJavaScriptLibrary` multipart `rawitemdata` (not `<javascript>`). `dxl_ssjs.py` decodes those into `business_logic` / audit units so APIs like `claimsPayments.exportUnprocessed` / `uploadFile` and `blueprism.getAttachment` are inventoried. **Re-upload DXL** after deploy so Neon graphs pick up the bodies.
+
 | Status | Meaning |
 |--------|---------|
 | `SAFE_NO_HANDLES` | No Domino allocation signals |
