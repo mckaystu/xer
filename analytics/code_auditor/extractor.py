@@ -175,39 +175,63 @@ def extract_units_from_dxl_bytes(content: bytes | str, source_file: str) -> list
 
     # SSJS script libraries stored as $ServerJavaScriptLibrary (not <javascript>)
     units.extend(_extract_server_js_libraries(root, source_file, text))
+    # Java / XPage / JS file resources stored as $FileData notes
+    units.extend(_extract_filedata_units(root, source_file))
 
     return units
 
 
 def _extract_server_js_libraries(root: ET.Element, source_file: str, text: str) -> list[CodeUnit]:
-    from dxl_ssjs import extract_server_javascript_library
+    from dxl_ssjs import extract_server_javascript_library, extract_client_javascript_library
 
     units: list[CodeUnit] = []
     for elem in root.iter():
         if local_tag(elem) != "scriptlibrary":
             continue
         name = elem_attr(elem, "name") or "Unnamed"
-        body = extract_server_javascript_library(elem)
-        if not body:
-            continue
-        # Prefer offset near this library name when possible
-        name_idx = text.find(f"name='{name}'")
-        if name_idx < 0:
-            name_idx = text.find(f'name="{name}"')
-        idx = text.find("$ServerJavaScriptLibrary")
-        start_line = text.count("\n", 0, name_idx) + 1 if name_idx >= 0 else (
-            text.count("\n", 0, idx) + 1 if idx >= 0 else 1
-        )
+        for body, event in (
+            (extract_server_javascript_library(elem), "library"),
+            (extract_client_javascript_library(elem), "client_library"),
+        ):
+            if not body:
+                continue
+            name_idx = text.find(f"name='{name}'")
+            if name_idx < 0:
+                name_idx = text.find(f'name="{name}"')
+            idx = text.find("$ServerJavaScriptLibrary")
+            start_line = text.count("\n", 0, name_idx) + 1 if name_idx >= 0 else (
+                text.count("\n", 0, idx) + 1 if idx >= 0 else 1
+            )
+            units.append(
+                CodeUnit(
+                    source_file=source_file,
+                    element_name=name,
+                    element_type="scriptlibrary",
+                    language="javascript",
+                    event=event,
+                    body=body,
+                    start_line=start_line,
+                    keywords_matched=prefilter_keywords(body),
+                )
+            )
+    return units
+
+
+def _extract_filedata_units(root: ET.Element, source_file: str) -> list[CodeUnit]:
+    from dxl_filedata import extract_filedata_code_from_root
+
+    units: list[CodeUnit] = []
+    for item in extract_filedata_code_from_root(root):
         units.append(
             CodeUnit(
                 source_file=source_file,
-                element_name=name,
-                element_type="scriptlibrary",
-                language="javascript",
-                event="library",
-                body=body,
-                start_line=start_line,
-                keywords_matched=prefilter_keywords(body),
+                element_name=item.title,
+                element_type=item.owner_type,
+                language=item.language,
+                event=item.event,
+                body=item.body,
+                start_line=1,
+                keywords_matched=prefilter_keywords(item.body),
             )
         )
     return units

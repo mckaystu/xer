@@ -14,6 +14,7 @@ import xml.etree.ElementTree as ET
 from typing import Iterable
 
 SERVER_JS_ITEM = "$ServerJavaScriptLibrary"
+CLIENT_JS_ITEM = "$ClientJavaScriptLibrary"
 
 # Start of real SSJS source inside a Notes composite item payload.
 _RE_JS_START = re.compile(
@@ -80,12 +81,21 @@ def decode_server_javascript_chunks(raw_b64_chunks: Iterable[str]) -> str:
 
 def iter_server_javascript_rawitemdata(scriptlibrary_elem: ET.Element) -> list[str]:
     """Collect base64 payloads from ``$ServerJavaScriptLibrary`` items under a library."""
+    return _iter_named_rawitemdata(scriptlibrary_elem, SERVER_JS_ITEM)
+
+
+def iter_client_javascript_rawitemdata(scriptlibrary_elem: ET.Element) -> list[str]:
+    """Collect base64 payloads from ``$ClientJavaScriptLibrary`` items under a library."""
+    return _iter_named_rawitemdata(scriptlibrary_elem, CLIENT_JS_ITEM)
+
+
+def _iter_named_rawitemdata(scriptlibrary_elem: ET.Element, item_name: str) -> list[str]:
     chunks: list[str] = []
     for item in scriptlibrary_elem.iter():
         if _local_tag(item) != "item":
             continue
         name = _elem_attr(item, "name") or ""
-        if name != SERVER_JS_ITEM:
+        if name != item_name:
             continue
         for child in item.iter():
             if _local_tag(child) == "rawitemdata":
@@ -98,6 +108,17 @@ def iter_server_javascript_rawitemdata(scriptlibrary_elem: ET.Element) -> list[s
 def extract_server_javascript_library(scriptlibrary_elem: ET.Element) -> str | None:
     """Return decoded SSJS source for a ``<scriptlibrary>``, or None if absent/empty."""
     chunks = iter_server_javascript_rawitemdata(scriptlibrary_elem)
+    if not chunks:
+        return None
+    body = decode_server_javascript_chunks(chunks)
+    if not body or len(body.strip()) < 8:
+        return None
+    return body
+
+
+def extract_client_javascript_library(scriptlibrary_elem: ET.Element) -> str | None:
+    """Return decoded CSJS source from ``$ClientJavaScriptLibrary``, or None."""
+    chunks = iter_client_javascript_rawitemdata(scriptlibrary_elem)
     if not chunks:
         return None
     body = decode_server_javascript_chunks(chunks)

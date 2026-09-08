@@ -12,6 +12,7 @@ Xer audits HCL Domino application code extracted from DXL / On-Disk Projects (an
 - Function-level recycle coverage inventory
 - Optional AI discrepancy review (`--llm`)
 - Domino **SSJS script libraries** stored as `$ServerJavaScriptLibrary` (decoded from DXL rawitemdata)
+- On-disk **`$FileData` notes** (`.java`, `.xsp`, `.jss`) decoded at DXL load so Java classes and XPage SSJS enter `business_logic` / inventory / audit automatically
 
 **Entry points**
 
@@ -104,7 +105,9 @@ Catalog lives in `analytics/code_auditor/models.py`. Detectors: `rules.py`, `ls_
 
 Primary Handle Exhaustion inventory covers **Java / SSJS / XPages** only (`handle_exhaustion_scope: java_javascript_xpages`). LotusScript units are skipped (`lotus_script_units_skipped`).
 
-SSJS script libraries in DXL are often stored as `$ServerJavaScriptLibrary` multipart `rawitemdata` (not `<javascript>`). `dxl_ssjs.py` decodes those into `business_logic` / audit units so APIs like `claimsPayments.exportUnprocessed` / `uploadFile` and `blueprism.getAttachment` are inventoried. **Re-upload DXL** after deploy so Neon graphs pick up the bodies.
+SSJS script libraries in DXL are often stored as `$ServerJavaScriptLibrary` multipart `rawitemdata` (not `<javascript>`). `dxl_ssjs.py` decodes those into `business_logic` / audit units so APIs like `claimsPayments.exportUnprocessed` / `uploadFile` and `blueprism.getAttachment` are inventoried.
+
+Java classes and XPages in ODP-style NSF exports live as `$FileData` notes (`.java` / `.xsp`). `dxl_filedata.py` decodes them at graph build / upload time; XPage `#{javascript:…}` fragments become discrete JavaScript units. **Re-upload DXL** after deploy so Neon graphs pick up the bodies.
 
 | Status | Meaning |
 |--------|---------|

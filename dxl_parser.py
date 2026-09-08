@@ -22,7 +22,7 @@ XER_ROOT = Path(__file__).resolve().parent
 DEFAULT_INPUT_DIR = XER_ROOT / "dxl_input"
 DEFAULT_OUTPUT_PATH = XER_ROOT / "application_graph.json"
 
-PARSER_VERSION = "1.3.0"
+PARSER_VERSION = "1.4.0"
 DXL_NS = "http://www.lotus.com/dxl"
 NS = {"dxl": DXL_NS}
 
@@ -156,6 +156,17 @@ class ScriptLibraryModel:
     code_events: list[CodeBlock] = field(default_factory=list)
 
 
+@dataclass
+class FileResourceModel:
+    """Java / XPage / JS source extracted from ``$FileData`` notes."""
+
+    name: str
+    kind: str  # javaclass | xpage | javascript_resource
+    source_file: str
+    database_id: str
+    code_events: list[CodeBlock] = field(default_factory=list)
+
+
 # ---------------------------------------------------------------------------
 # XML helpers
 # ---------------------------------------------------------------------------
@@ -210,39 +221,101 @@ def find_descendants(elem: ET.Element, tag: str) -> list[ET.Element]:
 
 def extract_code_blocks(container: ET.Element, context: str) -> list[CodeBlock]:
     blocks: list[CodeBlock] = []
+    seen_bodies: set[str] = set()
+
+    def add(language: str, event: str | None, body: str) -> None:
+        body = (body or "").strip()
+        if not body or len(body) < 8:
+            return
+        key = f"{language}:{body[:160]}"
+        if key in seen_bodies:
+            return
+        seen_bodies.add(key)
+        blocks.append(
+            CodeBlock(
+                language=language,
+                event=event,
+                body=body,
+                context=context,
+            )
+        )
+
     for code_elem in find_descendants(container, "code"):
         event = elem_attr(code_elem, "event")
         for child in code_elem:
-            tag = local_tag(child)
-            if tag in {"formula", "lotusscript", "java", "javascript"}:
-                body = text_content(child)
-                if body:
-                    blocks.append(
-                        CodeBlock(
-                            language=tag,
-                            event=event,
-                            body=body,
-                            context=context,
-                        )
-                    )
+            tag = local_tag(child).lower()
+            if tag in {"formula", "lotusscript", "java", "javascript", "jscript", "ssjs"}:
+                lang = "javascript" if tag in {"jscript", "ssjs"} else tag
+                add(lang, event, text_content(child))
+
+    # Bare <java> / <javaproject> (common in script libraries without <code> wrapper)
+    for elem in container.iter():
+        tag = local_tag(elem).lower()
+        if tag == "java":
+            add("java", "java", text_content(elem))
+        elif tag == "javaproject":
+            # Prefer child <java> tags; fall back to project text if it looks like source
+            child_java = [c for c in elem.iter() if local_tag(c).lower() == "java"]
+            if child_java:
+                for c in child_java:
+                    add("java", "javaproject", text_content(c))
+            else:
+                body = text_content(elem)
+                if "class " in body or "package " in body or "import " in body:
+                    add("java", "javaproject", body)
+
     return blocks
 
 
 def extract_server_js_code_blocks(scriptlibrary_elem: ET.Element, context: str) -> list[CodeBlock]:
-    """Decode ``$ServerJavaScriptLibrary`` payloads into a javascript CodeBlock."""
-    from dxl_ssjs import extract_server_javascript_library
+    """Decode ``$ServerJavaScriptLibrary`` / ``$ClientJavaScriptLibrary`` payloads."""
+    from dxl_ssjs import extract_client_javascript_library, extract_server_javascript_library
 
-    body = extract_server_javascript_library(scriptlibrary_elem)
-    if not body:
-        return []
-    return [
-        CodeBlock(
-            language="javascript",
-            event="library",
-            body=body,
-            context=context,
+    blocks: list[CodeBlock] = []
+    for body, event in (
+        (extract_server_javascript_library(scriptlibrary_elem), "library"),
+        (extract_client_javascript_library(scriptlibrary_elem), "client_library"),
+    ):
+        if not body:
+            continue
+        blocks.append(
+            CodeBlock(
+                language="javascript",
+                event=event,
+                body=body,
+                context=context,
+            )
         )
-    ]
+    return blocks
+
+
+def extract_file_resource_models(
+    root: ET.Element, source_file: str, database_id: str
+) -> list[FileResourceModel]:
+    """Decode ``$FileData`` notes (``.java`` / ``.xsp`` / ``.jss``) into analyzable owners."""
+    from dxl_filedata import extract_filedata_code_from_root
+
+    by_name: dict[str, FileResourceModel] = {}
+    for unit in extract_filedata_code_from_root(root):
+        model = by_name.get(unit.title)
+        if model is None:
+            model = FileResourceModel(
+                name=unit.title,
+                kind=unit.owner_type,
+                source_file=source_file,
+                database_id=database_id,
+                code_events=[],
+            )
+            by_name[unit.title] = model
+        model.code_events.append(
+            CodeBlock(
+                language=unit.language,
+                event=unit.event,
+                body=unit.body,
+                context=f"{unit.owner_type}:{unit.title}",
+            )
+        )
+    return list(by_name.values())
 
 
 def extract_string_args(arg_blob: str) -> list[str]:
@@ -919,6 +992,7 @@ class ParsedDXLFile:
     script_libraries: list[ScriptLibraryModel]
     edges: list[Edge]
     parse_errors: list[str] = field(default_factory=list)
+    file_resources: list[FileResourceModel] = field(default_factory=list)
 
 
 class DXLFileParser:
@@ -928,12 +1002,14 @@ class DXLFileParser:
 
     def parse_text(self, raw_text: str, source_file: str, path: Path | None = None) -> ParsedDXLFile:
         path = path or Path(source_file)
+        database_title: str | None = None
         database_path: str | None = None
         forms: list[FormModel] = []
         subforms: list[FormModel] = []
         views: list[ViewModel] = []
         agents: list[AgentModel] = []
         script_libraries: list[ScriptLibraryModel] = []
+        file_resources: list[FileResourceModel] = []
         edges: list[Edge] = []
         parse_errors: list[str] = []
 
@@ -951,6 +1027,7 @@ class DXLFileParser:
                 views=views,
                 agents=agents,
                 script_libraries=script_libraries,
+                file_resources=file_resources,
                 edges=edges,
                 parse_errors=parse_errors,
             )
@@ -1037,6 +1114,15 @@ class DXLFileParser:
                 )
             )
 
+        # Java / XPage / JS stored as $FileData notes (ODP-style NSF export)
+        file_resources = extract_file_resource_models(root, source_file, database_id)
+        for res in file_resources:
+            edges.extend(
+                edges_from_code_blocks(
+                    res.code_events, res.kind, res.name, source_file, database_id
+                )
+            )
+
         edges = dedupe_edges(edges)
 
         return ParsedDXLFile(
@@ -1048,6 +1134,7 @@ class DXLFileParser:
             views=views,
             agents=agents,
             script_libraries=script_libraries,
+            file_resources=file_resources,
             edges=edges,
             parse_errors=parse_errors,
         )
@@ -1105,6 +1192,7 @@ class ApplicationGraphBuilder:
         all_views: list[ViewModel] = []
         all_agents: list[AgentModel] = []
         all_libraries: list[ScriptLibraryModel] = []
+        all_file_resources: list[FileResourceModel] = []
         all_edges: list[Edge] = []
         source_files: list[dict[str, Any]] = []
         global_errors: list[dict[str, str]] = []
@@ -1123,6 +1211,7 @@ class ApplicationGraphBuilder:
             all_views.extend(parsed.views)
             all_agents.extend(parsed.agents)
             all_libraries.extend(parsed.script_libraries)
+            all_file_resources.extend(getattr(parsed, "file_resources", []) or [])
             all_edges.extend(parsed.edges)
 
             source_files.append(
@@ -1137,6 +1226,7 @@ class ApplicationGraphBuilder:
                         "views": len(parsed.views),
                         "agents": len(parsed.agents),
                         "script_libraries": len(parsed.script_libraries),
+                        "file_resources": len(getattr(parsed, "file_resources", []) or []),
                         "edges": len(parsed.edges),
                     },
                 }
@@ -1160,7 +1250,7 @@ class ApplicationGraphBuilder:
         all_edges = dedupe_edges(all_edges)
 
         business_logic = self._collect_business_logic(
-            all_forms, all_subforms, all_views, all_agents, all_libraries
+            all_forms, all_subforms, all_views, all_agents, all_libraries, all_file_resources
         )
 
         return {
@@ -1176,6 +1266,7 @@ class ApplicationGraphBuilder:
                     "views": len(all_views),
                     "agents": len(all_agents),
                     "script_libraries": len(all_libraries),
+                    "file_resources": len(all_file_resources),
                     "edges": len(all_edges),
                     "business_logic_blocks": len(business_logic),
                 },
@@ -1187,6 +1278,7 @@ class ApplicationGraphBuilder:
                 "views": to_plain(all_views),
                 "agents": to_plain(all_agents),
                 "script_libraries": to_plain(all_libraries),
+                "file_resources": to_plain(all_file_resources),
             },
             "edges": to_plain(all_edges),
             "business_logic": business_logic,
@@ -1199,6 +1291,7 @@ class ApplicationGraphBuilder:
         views: list[ViewModel],
         agents: list[AgentModel],
         libraries: list[ScriptLibraryModel],
+        file_resources: list[FileResourceModel] | None = None,
     ) -> list[dict[str, Any]]:
         blocks: list[dict[str, Any]] = []
 
@@ -1299,6 +1392,9 @@ class ApplicationGraphBuilder:
         for lib in libraries:
             add_blocks("scriptlibrary", lib.name, lib.source_file, lib.database_id, lib.code_events)
 
+        for res in file_resources or []:
+            add_blocks(res.kind, res.name, res.source_file, res.database_id, res.code_events)
+
         return blocks
 
     @staticmethod
@@ -1373,6 +1469,10 @@ class ApplicationGraphBuilder:
             return "lotusscript_logic"
         if code.language == "java":
             return "java_logic"
+        if code.language in {"javascript", "jscript", "ssjs"}:
+            return "javascript_logic"
+        if code.language in {"xpages", "xsp"}:
+            return "xpages_logic"
         return "general_formula"
 
 
