@@ -102,6 +102,12 @@ let currentAnalysis = null;
 let currentCodeAudit = null;
 let currentFunctionInventory = null;
 let auditFindingFilter = "all"; // all | verified | false_positive | blind_spot | handle | performance | ai_discovered
+let findingsPage = 0;
+const FINDINGS_PAGE_SIZE = 25;
+let inventoryListFilter = "actionable"; // actionable | unprotected | partial | all | fp | safe
+let inventorySearch = "";
+let inventoryPage = 0;
+const INVENTORY_PAGE_SIZE = 25;
 let pendingDeepDive = null; // { kind: "finding"|"inventory", idx: number } | null
 let fullGraph = null;
 let activeView = "code";
@@ -910,6 +916,83 @@ function inventoryRiskClass(safetyRate, recycleAmongAllocators, allocating) {
   return coverageRiskClass(safetyRate);
 }
 
+function inventoryMatchesFilter(f, filter) {
+  const status = f.status || "";
+  const actionable = [
+    "UNPROTECTED_ALLOCATION",
+    "PARTIAL_CLEANUP",
+    "CONDITIONAL_CLEANUP",
+    "ESCAPE_PATH_GAP",
+  ];
+  if (filter === "actionable") {
+    return actionable.includes(status) && !f.is_false_positive;
+  }
+  if (filter === "unprotected") {
+    return status === "UNPROTECTED_ALLOCATION" && !f.is_false_positive;
+  }
+  if (filter === "partial") {
+    return (
+      ["PARTIAL_CLEANUP", "CONDITIONAL_CLEANUP", "ESCAPE_PATH_GAP"].includes(status) &&
+      !f.is_false_positive
+    );
+  }
+  if (filter === "fp") return !!f.is_false_positive;
+  if (filter === "safe") {
+    return status === "SAFE_NO_HANDLES" || status === "PROTECTED";
+  }
+  return true; // all
+}
+
+function filterInventoryRows(list, filter, search) {
+  const q = (search || "").trim().toLowerCase();
+  return (list || [])
+    .map((f, idx) => ({ f, idx }))
+    .filter(({ f }) => inventoryMatchesFilter(f, filter))
+    .filter(({ f }) => {
+      if (!q) return true;
+      const hay = `${f.id || ""} ${f.function_name || ""} ${f.design_element || ""} ${
+        f.language || ""
+      } ${f.status || ""}`.toLowerCase();
+      return hay.includes(q);
+    });
+}
+
+function paginateItems(items, page, pageSize) {
+  const total = items.length;
+  const pages = Math.max(1, Math.ceil(total / pageSize) || 1);
+  const safePage = Math.min(Math.max(0, page), pages - 1);
+  const start = safePage * pageSize;
+  return {
+    page: safePage,
+    pages,
+    total,
+    start,
+    end: Math.min(start + pageSize, total),
+    slice: items.slice(start, start + pageSize),
+  };
+}
+
+function renderListPager(prefix, pager) {
+  const { page, pages, total, start, end } = pager;
+  if (total === 0) {
+    return `<div class="list-pager"><span>No matching items</span></div>`;
+  }
+  return `
+    <div class="list-pager">
+      <span>Showing ${start + 1}–${end} of ${total}</span>
+      <div class="list-pager-actions">
+        <button type="button" class="ai-run-btn" data-${prefix}-page="prev" ${
+          page <= 0 ? "disabled" : ""
+        }>Previous</button>
+        <span>Page ${page + 1} / ${pages}</span>
+        <button type="button" class="ai-run-btn" data-${prefix}-page="next" ${
+          page >= pages - 1 ? "disabled" : ""
+        }>Next</button>
+      </div>
+    </div>
+  `;
+}
+
 function renderFunctionInventoryCard(inventory) {
   if (!inventory?.summary) {
     return `<section class="overview-section"><h2>Function &amp; Recycle Inventory</h2><p class="placeholder">Inventory not available for this graph.</p></section>`;
@@ -926,14 +1009,12 @@ function renderFunctionInventoryCard(inventory) {
     typeof s.functions_safe_no_handles === "number"
       ? s.functions_safe_no_handles
       : Math.max(0, scanned - allocating);
-  // Primary ring: overall handle safety (safe + fully protected) / scanned
   const safetyRate =
     typeof s.handle_safety_rate === "number"
       ? s.handle_safety_rate
       : scanned
         ? Math.round(((safeNoHandles + withCleanup) / scanned) * 1000) / 10
         : 100;
-  // Secondary: cleanup only among allocators
   const recycleAmongAllocators =
     typeof s.recycle_coverage_rate === "number"
       ? s.recycle_coverage_rate
@@ -945,9 +1026,23 @@ function renderFunctionInventoryCard(inventory) {
     allocating > 0 && recycleAmongAllocators < 50
       ? `<p class="score-hint coverage-warning" role="status"><strong>${recycleAmongAllocators}%</strong> of allocators actually clean up — handle-table risk remains high despite the blended safety rate.</p>`
       : "";
-  const fpInv = (inventory.inventory || []).filter((f) => f.is_false_positive).length;
-  const rows = (inventory.inventory || [])
-    .map((f, idx) => {
+  const allRows = inventory.inventory || [];
+  const fpInv = allRows.filter((f) => f.is_false_positive).length;
+  const actionableCount = allRows.filter((f) =>
+    inventoryMatchesFilter(f, "actionable")
+  ).length;
+  const filtered = filterInventoryRows(allRows, inventoryListFilter, inventorySearch);
+  const pager = paginateItems(filtered, inventoryPage, INVENTORY_PAGE_SIZE);
+  inventoryPage = pager.page;
+
+  const filterBtn = (id, label, count) => {
+    const active = inventoryListFilter === id ? "active" : "";
+    const countHtml = typeof count === "number" ? ` <span class="filter-count">${count}</span>` : "";
+    return `<button type="button" class="findings-filter ${active}" data-inventory-filter="${id}">${label}${countHtml}</button>`;
+  };
+
+  const rows = pager.slice
+    .map(({ f, idx }) => {
       const fpBadge = f.is_false_positive
         ? ` <span class="ai-badge ai-badge-fp">False Positive</span>`
         : f.ai_validation_status === "VERIFIED"
@@ -955,19 +1050,18 @@ function renderFunctionInventoryCard(inventory) {
           : f.ai_validation_status === "VERIFIED_NON_LOOP"
             ? ` <span class="ai-badge ai-badge-verified">Non-loop</span>`
             : "";
+      const sev = f.risk_severity || f.severity || "";
       return `<tr class="inventory-row ${inventoryStatusClass(f.status)}${
         f.is_false_positive ? " is-fp" : ""
       }" data-inventory-idx="${idx}" role="button" tabindex="0">
           <td><code>${escapeHtml(f.id)}</code></td>
           <td><code>${escapeHtml(f.function_name)}</code>${fpBadge}</td>
           <td>${escapeHtml(f.design_element)}</td>
-          <td>${escapeHtml(f.language)}</td>
-          <td>${f.allocates_handles ? "Yes" : "No"}</td>
-          <td>${f.recycle_call_count}</td>
+          <td>${escapeHtml(sev)}</td>
           <td><span class="status-pill ${inventoryStatusClass(f.status)}">${escapeHtml(
             inventoryStatusLabel(f.status)
           )}</span></td>
-          <td>${f.loc}</td>
+          <td>${f.recycle_call_count}</td>
         </tr>`;
     })
     .join("");
@@ -986,11 +1080,7 @@ function renderFunctionInventoryCard(inventory) {
         <strong>${withCleanup}</strong> fully clean up (<strong>${recycleAmongAllocators}%</strong> recycle coverage),
         <strong>${incomplete}</strong> have partial/conditional cleanup,
         and <strong>${unprotected}</strong> are unprotected.
-        ${
-          unprotected + incomplete > 0
-            ? ` Open an <strong>Unprotected</strong> / <strong>Partial</strong> row below to see missing <code>.recycle()</code>.`
-            : ""
-        }
+        Default list shows <strong>Needs work</strong> only (${actionableCount}) — use filters or search to browse the rest.
       </p>
       ${
         s.lotus_script_units_skipped
@@ -1033,12 +1123,28 @@ function renderFunctionInventoryCard(inventory) {
         </div>
         ${allocatorCleanupWarning}
         ${rateExplainer}
-        <p class="score-hint coverage-hint">Click a table row for As-Is / To-Be deep-dive. AI false-positive review runs with Code Analysis when an API key is configured; you can also mark FP on a row (persists across refreshes).</p>
+        <div class="findings-filter-bar" role="toolbar" aria-label="Inventory filters">
+          ${filterBtn("actionable", "Needs work", actionableCount)}
+          ${filterBtn("unprotected", "Unprotected", unprotected)}
+          ${filterBtn("partial", "Partial / gaps", incomplete)}
+          ${filterBtn("fp", "False positives", fpInv)}
+          ${filterBtn("safe", "Safe / protected", safeNoHandles + withCleanup)}
+          ${filterBtn("all", "All functions", scanned)}
+        </div>
+        <div class="list-toolbar">
+          <input type="search" id="inventorySearchInput" placeholder="Search function, class, id…" value="${escapeHtml(
+            inventorySearch
+          )}" />
+          <span class="score-hint">${pager.total} match${pager.total === 1 ? "" : "es"} · ${INVENTORY_PAGE_SIZE}/page</span>
+        </div>
+        ${renderListPager("inventory", pager)}
         ${
           rows
-            ? `<table class="overview-table inventory-table"><thead><tr><th>ID</th><th>Function</th><th>Design element</th><th>Lang</th><th>Allocates</th><th>Recycles</th><th>Status</th><th>LOC</th></tr></thead><tbody>${rows}</tbody></table>`
-            : `<p class="placeholder">No functions extracted from stored script blocks.</p>`
+            ? `<div class="table-scroll"><table class="overview-table inventory-table"><thead><tr><th>ID</th><th>Function</th><th>Design element</th><th>Sev</th><th>Status</th><th>Recycles</th></tr></thead><tbody>${rows}</tbody></table></div>`
+            : `<p class="placeholder">No functions match this filter.</p>`
         }
+        ${renderListPager("inventory", pager)}
+        <p class="score-hint coverage-hint">Click a row for As-Is / To-Be deep-dive. Mark FP on a row to persist across refreshes.</p>
         <div id="inventoryDeepDive" class="audit-deep-dive hidden"></div>
       </div>
     </section>
@@ -1317,7 +1423,9 @@ function renderCodeAuditCard(audit) {
   const findings = audit.findings || [];
   const aiSum = audit.ai_discrepancy_summary || {};
   const filtered = filterAuditFindings(findings, auditFindingFilter);
-  const rows = filtered
+  const findingsPager = paginateItems(filtered, findingsPage, FINDINGS_PAGE_SIZE);
+  findingsPage = findingsPager.page;
+  const rows = findingsPager.slice
     .map(({ f, idx }) => {
       const bucket = findingFilterBucket(f);
       const cat = findingCategoryBucket(f);
@@ -1397,15 +1505,17 @@ function renderCodeAuditCard(audit) {
             }</span>
           </div>
         </div>
+        ${renderListPager("findings", findingsPager)}
         ${
           rows
-            ? `<table class="overview-table audit-table"><thead><tr><th>ID</th><th>Sev</th><th>Issue</th><th>Lang</th><th>Location</th><th>Conf</th></tr></thead><tbody>${rows}</tbody></table>`
+            ? `<div class="table-scroll"><table class="overview-table audit-table"><thead><tr><th>ID</th><th>Sev</th><th>Issue</th><th>Lang</th><th>Location</th><th>Conf</th></tr></thead><tbody>${rows}</tbody></table></div>`
             : `<p class="placeholder">${
                 findings.length
                   ? "No findings match this filter."
                   : "No handle-leak / memory anti-patterns detected in stored script blocks."
               }</p>`
         }
+        ${renderListPager("findings", findingsPager)}
         <div id="auditDeepDive" class="audit-deep-dive hidden"></div>
       </div>
     </section>
@@ -1553,6 +1663,8 @@ function renderCodeAnalysis() {
   wireInventoryDeepDive();
   wireCodeAuditDeepDive();
   wireAuditFindingFilters();
+  wireInventoryListControls();
+  wireListPagers();
   wireExportChecklistButton();
   wireRefreshAnalysisButton();
   if (pendingDeepDive) {
@@ -1729,7 +1841,63 @@ function wireAuditFindingFilters() {
   document.querySelectorAll("[data-findings-filter]").forEach((btn) => {
     btn.addEventListener("click", () => {
       auditFindingFilter = btn.dataset.findingsFilter || "all";
+      findingsPage = 0;
       renderCodeAnalysis();
+    });
+  });
+}
+
+function wireInventoryListControls() {
+  document.querySelectorAll("[data-inventory-filter]").forEach((btn) => {
+    btn.addEventListener("click", () => {
+      inventoryListFilter = btn.dataset.inventoryFilter || "actionable";
+      inventoryPage = 0;
+      renderCodeAnalysis();
+    });
+  });
+  const search = document.getElementById("inventorySearchInput");
+  if (!search) return;
+  search.addEventListener("keydown", (e) => {
+    if (e.key === "Enter") {
+      inventorySearch = search.value || "";
+      inventoryPage = 0;
+      renderCodeAnalysis();
+      const again = document.getElementById("inventorySearchInput");
+      if (again) {
+        again.focus();
+        const len = again.value.length;
+        again.setSelectionRange(len, len);
+      }
+    }
+  });
+  search.addEventListener("change", () => {
+    inventorySearch = search.value || "";
+    inventoryPage = 0;
+    renderCodeAnalysis();
+  });
+}
+
+function wireListPagers() {
+  document.querySelectorAll("[data-inventory-page]").forEach((btn) => {
+    btn.addEventListener("click", () => {
+      const dir = btn.dataset.inventoryPage;
+      inventoryPage += dir === "next" ? 1 : -1;
+      renderCodeAnalysis();
+      document.getElementById("functionInventorySection")?.scrollIntoView({
+        behavior: "smooth",
+        block: "start",
+      });
+    });
+  });
+  document.querySelectorAll("[data-findings-page]").forEach((btn) => {
+    btn.addEventListener("click", () => {
+      const dir = btn.dataset.findingsPage;
+      findingsPage += dir === "next" ? 1 : -1;
+      renderCodeAnalysis();
+      document.getElementById("codeAuditSection")?.scrollIntoView({
+        behavior: "smooth",
+        block: "start",
+      });
     });
   });
 }
@@ -1948,12 +2116,15 @@ function setActiveView(view) {
   const isRules = view === "rules";
   const isCode = view === "code";
   const hideGraph = isMatrix || isOverview || isRules || isCode;
+  const hideDetail = isOverview || isRules || isCode;
   graphPanel.classList.toggle("hidden", hideGraph);
   matrixPanel.classList.toggle("hidden", !isMatrix);
   overviewPanel.classList.toggle("hidden", !isOverview);
   codeAnalysisPanel?.classList.toggle("hidden", !isCode);
   rulesPanel?.classList.toggle("hidden", !isRules);
   legend?.classList.toggle("hidden", hideGraph);
+  detailPanel?.classList.toggle("hidden", hideDetail);
+  document.querySelector(".layout")?.classList.toggle("layout-full", hideDetail);
 
   focusSelectLabel.classList.toggle("hidden", view !== "focus");
   edgeFilterLabel.classList.toggle("hidden", hideGraph);
@@ -2284,6 +2455,10 @@ async function loadSelectedGraph() {
   currentCodeAudit = null;
   currentFunctionInventory = null;
   auditFindingFilter = "all";
+  findingsPage = 0;
+  inventoryListFilter = "actionable";
+  inventorySearch = "";
+  inventoryPage = 0;
   syncEdgeFilterForGraph();
   populateFocusSelect();
   // Await audit/inventory BEFORE first graph paint so badges are present immediately
