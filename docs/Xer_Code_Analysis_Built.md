@@ -167,6 +167,9 @@ Requires `OPENAI_API_KEY` (optional `XER_AUDIT_MODEL`). Implemented in `llm_engi
 | **Pass 1** | False-positive filter; **`VERIFIED_NON_LOOP`** demotes one-shot helpers to LOW + hygiene note |
 | **Pass 2** | Blind spots on handle-allocating units with zero static hits → `DOM-BS-001` |
 | **Pass 3** | Cross-module ownership + severity escalation on background/hot paths → `DOM-BS-002` (deduped vs `DOM-OWN-001`) |
+| **Inventory FP** | Same AI run reviews actionable Function Inventory rows (ODA / caller-owned / mis-hits) |
+
+Human **Mark as false positive** on inventory or finding deep-dives persists in `dxl_graphs.triage_overrides` and survives Refresh analysis.
 
 ---
 

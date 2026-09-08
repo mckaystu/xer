@@ -32,6 +32,13 @@ class StoreGraphRequest(BaseModel):
     graph: dict[str, Any]
 
 
+class TriageOverrideRequest(BaseModel):
+    kind: str  # inventory | finding
+    id: str
+    is_false_positive: bool = True
+    reason: str = ""
+
+
 # Vercel serverless request body limit is ~4.5 MB; keep default just under that.
 MAX_DXL_UPLOAD_BYTES = int(float(os.getenv("XER_MAX_UPLOAD_MB", "4.5")) * 1024 * 1024)
 
@@ -359,6 +366,50 @@ def api_graph_audit_snapshot(
     if not payload:
         raise HTTPException(status_code=404, detail="Graph not found")
     return payload
+
+
+@app.post("/api/graphs/{graph_id}/triage")
+def api_graph_triage(graph_id: str, body: TriageOverrideRequest) -> dict[str, Any]:
+    """Mark or clear a false-positive on an inventory function or finding (persisted)."""
+    from neon_db import get_graph, set_triage_override
+
+    kind = (body.kind or "").strip().lower()
+    if kind in {"finding", "findings"}:
+        kind = "finding"
+    elif kind in {"inventory", "function", "func"}:
+        kind = "inventory"
+    else:
+        raise HTTPException(status_code=400, detail="kind must be 'inventory' or 'finding'")
+
+    try:
+        row = get_graph(graph_id)
+    except (ValueError, ConnectionError) as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    if not row:
+        raise HTTPException(status_code=404, detail="Graph not found")
+
+    try:
+        overrides = set_triage_override(
+            graph_id,
+            kind=kind,
+            item_id=body.id,
+            is_false_positive=bool(body.is_false_positive),
+            reason=body.reason or "",
+            source="human",
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except RuntimeError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+
+    return {
+        "ok": True,
+        "graph_id": graph_id,
+        "kind": kind,
+        "id": body.id,
+        "is_false_positive": body.is_false_positive,
+        "triage_overrides": overrides,
+    }
 
 
 @app.get("/api/graphs/{graph_id}/audit-trends")

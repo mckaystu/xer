@@ -134,6 +134,32 @@ If nothing to report: {"ownership_gaps": [], "severity_adjustments": []}.
 Prefer confidence >= 75 for ownership_gaps.
 """
 
+INVENTORY_FP_SYSTEM_PROMPT = """You are a Domino architecture expert reviewing Function & Recycle
+Inventory classifications for FALSE POSITIVES.
+
+Each item is a Java / SSJS / XPages function our static scanner marked as having incomplete
+.handle recycle() / cleanup. Decide for each:
+
+- FALSE_POSITIVE — not a real handle-table risk. Examples: OpenNTF Domino API (ODA) auto-lifecycle;
+  handle is returned and clearly caller-owned; recycle happens via a well-known helper in this body;
+  allocation is a non-handle / false regex match; framework wrapper owns the object.
+- VERIFIED_NON_LOOP — missing cleanup is real but one-shot / not in a collection loop → hygiene only.
+- VERIFIED — real risk; keep (especially allocations inside loops or hot agent paths).
+
+Return ONLY valid JSON:
+{
+  "reviews": [
+    {
+      "function_id": "FUNC-001",
+      "verdict": "VERIFIED|FALSE_POSITIVE|VERIFIED_NON_LOOP",
+      "confidence": 0-100,
+      "reasoning": "1-3 sentences"
+    }
+  ]
+}
+Be conservative on FALSE_POSITIVE — only when cleanup ownership or framework lifecycle is clear.
+"""
+
 
 def llm_available() -> bool:
     return bool(os.getenv("OPENAI_API_KEY", "").strip())
@@ -603,6 +629,119 @@ def enrich_with_llm(
     for idx, finding in enumerate(merged, start=1):
         finding.id = f"F-{idx:03d}"
     return merged, notes
+
+
+def enrich_inventory_with_llm(
+    records: list[Any],
+    *,
+    max_functions: int = 40,
+    model: str | None = None,
+) -> tuple[list[Any], list[str]]:
+    """Pass 4-style FP review for actionable Function Inventory rows (in-place)."""
+    from analytics.code_auditor.function_inventory import FunctionRecord
+
+    notes: list[str] = []
+    if not llm_available():
+        notes.append("OPENAI_API_KEY not set — skipped inventory AI false-positive review.")
+        return records, notes
+
+    model_name = model or os.getenv("XER_AUDIT_MODEL", "gpt-4o-mini")
+    actionable = [
+        r
+        for r in records
+        if isinstance(r, FunctionRecord)
+        and r.status
+        in {
+            "UNPROTECTED_ALLOCATION",
+            "PARTIAL_CLEANUP",
+            "CONDITIONAL_CLEANUP",
+            "ESCAPE_PATH_GAP",
+        }
+        and not r.is_false_positive
+    ]
+    # Prefer CRITICAL/HIGH and in-loop first
+    sev_rank = {"CRITICAL": 0, "HIGH": 1, "MEDIUM": 2, "LOW": 3}
+    actionable.sort(
+        key=lambda r: (
+            sev_rank.get(r.risk_severity, 9),
+            0 if r.in_loop else 1,
+            r.design_element,
+            r.function_name,
+        )
+    )
+    selected = actionable[: max(1, max_functions)]
+    if not selected:
+        notes.append("AI inventory FP review skipped — no actionable functions.")
+        return records, notes
+
+    # Batch in chunks of 8 to keep prompts small
+    reviewed = 0
+    fps = 0
+    chunk_size = 8
+    for i in range(0, len(selected), chunk_size):
+        batch = selected[i : i + chunk_size]
+        user_payload = {
+            "functions": [
+                {
+                    "function_id": r.id,
+                    "function_name": r.function_name,
+                    "design_element": r.design_element,
+                    "language": r.language,
+                    "status": r.status,
+                    "risk_severity": r.risk_severity,
+                    "in_loop": r.in_loop,
+                    "allocates_handles": r.allocates_handles,
+                    "recycle_call_count": r.recycle_call_count,
+                    "unclean_vars": r.unclean_vars[:12],
+                    "code": (r.code_snippet_as_is or "")[:6000],
+                }
+                for r in batch
+            ]
+        }
+        try:
+            payload = _chat_json(INVENTORY_FP_SYSTEM_PROMPT, user_payload, model=model_name)
+        except Exception as exc:  # noqa: BLE001
+            notes.append(f"AI inventory FP error: {exc}")
+            continue
+
+        by_id = {r.id: r for r in batch}
+        for review in payload.get("reviews") or []:
+            rid = str(review.get("function_id") or "")
+            rec = by_id.get(rid)
+            if not rec:
+                continue
+            verdict = str(review.get("verdict") or "VERIFIED").upper().strip()
+            reasoning = str(review.get("reasoning") or "").strip()
+            reviewed += 1
+            if verdict == "FALSE_POSITIVE":
+                rec.ai_validation_status = "FALSE_POSITIVE"
+                rec.ai_validation_reasoning = reasoning or (
+                    "AI judged this inventory hit safe (framework ownership / caller cleanup / non-handle)."
+                )
+                rec.is_false_positive = True
+                rec.triage_source = "ai"
+                rec.risk_severity = "LOW"
+                fps += 1
+            elif verdict in {"VERIFIED_NON_LOOP", "NON_LOOP", "VERIFIED_HYGIENE"}:
+                rec.ai_validation_status = "VERIFIED_NON_LOOP"
+                rec.ai_validation_reasoning = (
+                    (reasoning + " | " if reasoning else "") + NON_LOOP_AI_NOTE
+                )
+                rec.is_false_positive = False
+                rec.triage_source = "ai"
+                rec.risk_severity = "LOW"
+            else:
+                rec.ai_validation_status = "VERIFIED"
+                rec.ai_validation_reasoning = reasoning or (
+                    "AI confirmed incomplete recycle coverage is a real handle risk."
+                )
+                rec.is_false_positive = False
+                rec.triage_source = "ai"
+
+    notes.append(
+        f"AI inventory FP review: reviewed {reviewed} function(s), flagged {fps} false positive(s)."
+    )
+    return records, notes
 
 
 # Back-compat: older callers may still import this symbol

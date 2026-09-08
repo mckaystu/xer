@@ -110,6 +110,11 @@ class FunctionRecord:
     cleaned_vars: list[str] = field(default_factory=list)
     unclean_vars: list[str] = field(default_factory=list)
     cleanup_conditional: bool = False
+    # AI / human triage (inventory FP filter)
+    ai_validation_status: str = ""  # VERIFIED | FALSE_POSITIVE | VERIFIED_NON_LOOP | ""
+    ai_validation_reasoning: str = ""
+    is_false_positive: bool = False
+    triage_source: str = ""  # ai | human | ""
 
     def to_dict(self) -> dict[str, Any]:
         data = asdict(self)
@@ -532,20 +537,47 @@ def build_inventory(units: Iterable[CodeUnit]) -> list[FunctionRecord]:
 
 
 def summarize_inventory(records: list[FunctionRecord]) -> dict[str, Any]:
-    """Primary rates are Java/SSJS/XPages only — LotusScript is not C-API handle exhaustion."""
+    """Primary rates are Java/SSJS/XPages only — LotusScript is not C-API handle exhaustion.
+
+    False-positive rows (AI or human) are treated as resolved for risk metrics.
+    """
     capi = [r for r in records if is_capi_handle_language(r.language)]
     ls_recs = [r for r in records if is_lotusscript_language(r.language)]
     total = len(capi)
+    fp_count = sum(1 for r in capi if r.is_false_positive)
     allocating = [r for r in capi if r.allocates_handles]
-    fully_protected = [r for r in allocating if r.status == "PROTECTED"]
-    partial = [r for r in allocating if r.status == "PARTIAL_CLEANUP"]
-    conditional = [r for r in allocating if r.status == "CONDITIONAL_CLEANUP"]
-    escape_gaps = [r for r in allocating if r.status == "ESCAPE_PATH_GAP"]
-    unprotected = [r for r in allocating if r.status == "UNPROTECTED_ALLOCATION"]
-    with_cleanup = [r for r in allocating if r.status != "UNPROTECTED_ALLOCATION"]
+    fully_protected = [
+        r
+        for r in allocating
+        if r.status == "PROTECTED" or r.is_false_positive
+    ]
+    partial = [
+        r for r in allocating if r.status == "PARTIAL_CLEANUP" and not r.is_false_positive
+    ]
+    conditional = [
+        r
+        for r in allocating
+        if r.status == "CONDITIONAL_CLEANUP" and not r.is_false_positive
+    ]
+    escape_gaps = [
+        r for r in allocating if r.status == "ESCAPE_PATH_GAP" and not r.is_false_positive
+    ]
+    unprotected = [
+        r
+        for r in allocating
+        if r.status == "UNPROTECTED_ALLOCATION" and not r.is_false_positive
+    ]
+    with_cleanup = [r for r in allocating if r.status != "UNPROTECTED_ALLOCATION" or r.is_false_positive]
     safe = [r for r in capi if not r.allocates_handles]
+    active_allocators = [r for r in allocating if not r.is_false_positive]
     recycle_among_allocators = (
-        round((len(fully_protected) / len(allocating)) * 100.0, 1) if allocating else 100.0
+        round(
+            (len([r for r in active_allocators if r.status == "PROTECTED"]) / len(active_allocators))
+            * 100.0,
+            1,
+        )
+        if active_allocators
+        else 100.0
     )
     handle_safety_rate = (
         round(((len(safe) + len(fully_protected)) / total) * 100.0, 1) if total else 100.0
@@ -563,6 +595,7 @@ def summarize_inventory(records: list[FunctionRecord]) -> dict[str, Any]:
         "handle_safety_rate": handle_safety_rate,
         "recycle_coverage_rate": recycle_among_allocators,
         "functions_any_cleanup_signal": len(with_cleanup),
+        "false_positive_functions": fp_count,
         "handle_exhaustion_scope": "java_javascript_xpages",
         "lotus_script_functions_excluded": len(ls_recs),
         "all_languages_functions_scanned": len(records),
@@ -573,12 +606,17 @@ def run_function_inventory(
     source: str | None = None,
     *,
     graph: dict[str, Any] | None = None,
+    use_llm: bool = False,
+    max_llm_functions: int = 40,
 ) -> dict[str, Any]:
     """Build function inventory + recycle coverage summary from a path or graph.
 
     Handle Exhaustion inventory (ring metrics) covers Java / SSJS / XPages only.
     LotusScript units are omitted from the primary inventory — LS does not share
     the same C-API recycle / handle-table exhaustion model.
+
+    When ``use_llm=True`` and OPENAI_API_KEY is set, actionable rows are reviewed
+    for false positives (ODA, caller-owned handles, etc.).
     """
     if graph is not None:
         units = extract_units_from_graph(graph)
@@ -593,6 +631,20 @@ def run_function_inventory(
     # Primary C-API recycle inventory — Java / JS / XPages libraries & agents
     capi_units = [u for u in interesting if is_capi_handle_language(u.language)]
     records = build_inventory(capi_units)
+    notes: list[str] = []
+    llm_enabled = False
+    if use_llm:
+        from analytics.code_auditor.llm_engine import enrich_inventory_with_llm, llm_available
+
+        if llm_available():
+            records, inv_notes = enrich_inventory_with_llm(
+                records, max_functions=max_llm_functions
+            )
+            notes.extend(inv_notes)
+            llm_enabled = True
+        else:
+            notes.append("Inventory AI review skipped — OPENAI_API_KEY not set.")
+
     order = {
         "UNPROTECTED_ALLOCATION": 0,
         "ESCAPE_PATH_GAP": 1,
@@ -601,13 +653,22 @@ def run_function_inventory(
         "PROTECTED": 4,
         "SAFE_NO_HANDLES": 5,
     }
-    records.sort(key=lambda r: (order.get(r.status, 9), r.design_element, r.function_name))
+    records.sort(
+        key=lambda r: (
+            0 if r.is_false_positive else 1,
+            order.get(r.status, 9),
+            r.design_element,
+            r.function_name,
+        )
+    )
 
     summary = summarize_inventory(records)
     summary["lotus_script_units_skipped"] = ls_skipped
     return {
         "summary": summary,
         "inventory": [r.to_dict() for r in records],
+        "llm_enabled": llm_enabled,
+        "notes": notes,
     }
 
 

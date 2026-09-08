@@ -1109,6 +1109,18 @@ th { color: var(--muted); font-weight: 500; }
   gap: 0.5rem 0.75rem;
 }
 
+.triage-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.5rem 0.75rem;
+  margin: 0.75rem 0 1rem;
+}
+
+.inventory-row.is-fp {
+  opacity: 0.55;
+}
+
 .ai-run-btn {
   border: 1px solid rgba(91, 159, 212, 0.55);
   background: rgba(91, 159, 212, 0.12);

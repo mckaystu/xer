@@ -219,7 +219,8 @@ def get_graph(graph_id: str) -> dict[str, Any] | None:
             cur.execute(
                 """
                 SELECT id, nsf_path, database_title, parser_version, parsed_at, totals, graph,
-                       business_rules, modernization_score, audit_snapshot, audit_snapshot_at
+                       business_rules, modernization_score, audit_snapshot, audit_snapshot_at,
+                       triage_overrides
                 FROM dxl_graphs
                 WHERE id = %s
                 """,
@@ -242,6 +243,7 @@ def get_graph(graph_id: str) -> dict[str, Any] | None:
             "audit_snapshot_at": row["audit_snapshot_at"].isoformat()
             if row.get("audit_snapshot_at")
             else None,
+            "triage_overrides": row.get("triage_overrides") or {},
         }
     finally:
         conn.close()
@@ -467,7 +469,7 @@ def build_audit_snapshot(
     from analytics.code_auditor.function_inventory import run_function_inventory
 
     report = run_audit(graph=graph, use_llm=use_llm)
-    inventory = run_function_inventory(graph=graph)
+    inventory = run_function_inventory(graph=graph, use_llm=use_llm)
     findings = report.findings
     active = [f for f in findings if not f.is_false_positive]
     by_sev: dict[str, int] = {"CRITICAL": 0, "HIGH": 0, "MEDIUM": 0, "LOW": 0}
@@ -541,6 +543,8 @@ def cached_code_audit_from_row(row: dict[str, Any]) -> dict[str, Any] | None:
     if not isinstance(payload, dict) or "findings" not in payload:
         return None
     out = dict(payload)
+    out["findings"] = [dict(f) for f in (out.get("findings") or [])]
+    apply_triage_overrides(out, None, row.get("triage_overrides") or {})
     out["cached"] = True
     out["cached_at"] = row.get("audit_snapshot_at") or snap.get("captured_at")
     return out
@@ -554,10 +558,188 @@ def cached_function_inventory_from_row(row: dict[str, Any]) -> dict[str, Any] | 
     payload = snap.get("function_inventory")
     if not isinstance(payload, dict) or "summary" not in payload:
         return None
-    out = dict(payload)
+    out = {
+        "summary": dict(payload.get("summary") or {}),
+        "inventory": [dict(r) for r in (payload.get("inventory") or [])],
+        "llm_enabled": bool(payload.get("llm_enabled")),
+        "notes": list(payload.get("notes") or []),
+    }
+    apply_triage_overrides(None, out, row.get("triage_overrides") or {})
+    # Recompute summary so human FP marks update the ring without full re-analysis
+    try:
+        from analytics.code_auditor.function_inventory import FunctionRecord, summarize_inventory
+
+        records = []
+        for raw in out["inventory"]:
+            try:
+                records.append(
+                    FunctionRecord(
+                        id=str(raw.get("id") or ""),
+                        design_element=str(raw.get("design_element") or ""),
+                        function_name=str(raw.get("function_name") or ""),
+                        language=str(raw.get("language") or ""),
+                        allocates_handles=bool(raw.get("allocates_handles")),
+                        recycle_call_count=int(raw.get("recycle_call_count") or 0),
+                        status=str(raw.get("status") or "SAFE_NO_HANDLES"),  # type: ignore[arg-type]
+                        loc=int(raw.get("loc") or 0),
+                        in_loop=bool(raw.get("in_loop")),
+                        risk_severity=str(raw.get("risk_severity") or "MEDIUM"),
+                        is_false_positive=bool(raw.get("is_false_positive")),
+                    )
+                )
+            except Exception:  # noqa: BLE001
+                continue
+        if records:
+            summary = summarize_inventory(records)
+            summary["lotus_script_units_skipped"] = (payload.get("summary") or {}).get(
+                "lotus_script_units_skipped"
+            )
+            out["summary"] = summary
+    except Exception:  # noqa: BLE001
+        pass
     out["cached"] = True
     out["cached_at"] = row.get("audit_snapshot_at") or snap.get("captured_at")
     return out
+
+
+def apply_triage_overrides(
+    code_audit: dict[str, Any] | None,
+    inventory: dict[str, Any] | None,
+    overrides: dict[str, Any] | None,
+) -> None:
+    """Apply persisted human/AI triage marks onto audit/inventory payloads (in-place)."""
+    if not isinstance(overrides, dict):
+        return
+    inv_map = overrides.get("inventory") if isinstance(overrides.get("inventory"), dict) else {}
+    find_map = overrides.get("findings") if isinstance(overrides.get("findings"), dict) else {}
+
+    if inventory and inv_map:
+        for row in inventory.get("inventory") or []:
+            if not isinstance(row, dict):
+                continue
+            mark = inv_map.get(str(row.get("id") or ""))
+            if not isinstance(mark, dict):
+                continue
+            if "is_false_positive" in mark:
+                row["is_false_positive"] = bool(mark["is_false_positive"])
+            if mark.get("reason") or mark.get("ai_validation_reasoning"):
+                row["ai_validation_reasoning"] = str(
+                    mark.get("reason") or mark.get("ai_validation_reasoning") or ""
+                )
+            if "ai_validation_status" in mark:
+                row["ai_validation_status"] = str(mark.get("ai_validation_status") or "")
+            elif row.get("is_false_positive"):
+                row["ai_validation_status"] = "FALSE_POSITIVE"
+            if mark.get("source"):
+                row["triage_source"] = str(mark["source"])
+            if row.get("is_false_positive"):
+                row["risk_severity"] = "LOW"
+                row["severity"] = "LOW"
+            elif mark.get("source") == "human" and mark.get("is_false_positive") is False:
+                # Restored by human — drop FP styling even if snapshot still has AI FP
+                row["is_false_positive"] = False
+
+    if code_audit and find_map:
+        for f in code_audit.get("findings") or []:
+            if not isinstance(f, dict):
+                continue
+            key = str(f.get("id") or f.get("finding_id") or "")
+            mark = find_map.get(key)
+            if not isinstance(mark, dict):
+                continue
+            if "is_false_positive" in mark:
+                f["is_false_positive"] = bool(mark["is_false_positive"])
+            if mark.get("reason") or mark.get("ai_validation_reasoning"):
+                f["ai_validation_reasoning"] = str(
+                    mark.get("reason") or mark.get("ai_validation_reasoning") or ""
+                )
+            if "ai_validation_status" in mark:
+                f["ai_validation_status"] = str(mark.get("ai_validation_status") or "")
+            elif f.get("is_false_positive"):
+                f["ai_validation_status"] = "FALSE_POSITIVE"
+            if f.get("is_false_positive"):
+                f["severity"] = "LOW"
+            elif mark.get("source") == "human" and mark.get("is_false_positive") is False:
+                f["is_false_positive"] = False
+
+
+def get_triage_overrides(graph_id: str) -> dict[str, Any]:
+    row = get_graph(graph_id)
+    if not row:
+        return {}
+    raw = row.get("triage_overrides") or {}
+    return raw if isinstance(raw, dict) else {}
+
+
+def set_triage_override(
+    graph_id: str,
+    *,
+    kind: str,
+    item_id: str,
+    is_false_positive: bool,
+    reason: str = "",
+    source: str = "human",
+) -> dict[str, Any]:
+    """Persist a triage mark for an inventory function or finding id."""
+    from datetime import datetime, timezone
+
+    kind_key = "inventory" if kind == "inventory" else "findings"
+    item_id = str(item_id or "").strip()
+    if not item_id:
+        raise ValueError("item_id is required")
+    if kind_key not in {"inventory", "findings"}:
+        raise ValueError("kind must be inventory or finding")
+
+    conn = connect()
+    try:
+        init_schema(conn)
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            cur.execute(
+                "SELECT triage_overrides FROM dxl_graphs WHERE id = %s",
+                (str(graph_id),),
+            )
+            row = cur.fetchone()
+            if not row:
+                raise ValueError("Graph not found")
+            overrides = row.get("triage_overrides") or {}
+            if not isinstance(overrides, dict):
+                overrides = {}
+            bucket = dict(overrides.get(kind_key) or {})
+            if is_false_positive:
+                bucket[item_id] = {
+                    "is_false_positive": True,
+                    "reason": (reason or "").strip(),
+                    "source": source or "human",
+                    "ai_validation_status": "FALSE_POSITIVE",
+                    "at": datetime.now(timezone.utc).isoformat(),
+                }
+            else:
+                # Explicit clear — wins over AI marks stored in the snapshot
+                bucket[item_id] = {
+                    "is_false_positive": False,
+                    "reason": (reason or "Cleared by reviewer").strip(),
+                    "source": source or "human",
+                    "ai_validation_status": "",
+                    "at": datetime.now(timezone.utc).isoformat(),
+                }
+            overrides = {**overrides, kind_key: bucket}
+            cur.execute(
+                """
+                UPDATE dxl_graphs
+                SET triage_overrides = %s
+                WHERE id = %s
+                RETURNING triage_overrides
+                """,
+                (Json(overrides), str(graph_id)),
+            )
+            saved = cur.fetchone()["triage_overrides"]
+        conn.commit()
+        return saved if isinstance(saved, dict) else overrides
+    except psycopg2.Error as exc:
+        conn.rollback()
+        raise RuntimeError(f"Failed to save triage override: {exc}") from exc
+    finally:
+        conn.close()
 
 
 def ensure_audit_snapshot(

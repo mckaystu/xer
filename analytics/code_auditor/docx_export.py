@@ -89,7 +89,11 @@ def _actionable_functions(inventory: dict[str, Any] | None) -> list[dict[str, An
     rows = []
     if isinstance(inventory, dict):
         rows = [r for r in (inventory.get("inventory") or []) if isinstance(r, dict)]
-    actionable = [r for r in rows if r.get("status") in _ACTIONABLE_STATUSES]
+    actionable = [
+        r
+        for r in rows
+        if r.get("status") in _ACTIONABLE_STATUSES and not r.get("is_false_positive")
+    ]
     actionable.sort(key=_function_priority_key)
     return actionable
 

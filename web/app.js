@@ -157,13 +157,23 @@ const viewTabs = document.querySelectorAll(".view-tabs .tab");
 const dxlUpload = document.getElementById("dxlUpload");
 const uploadStatus = document.getElementById("uploadStatus");
 
-async function fetchJson(url) {
-  const res = await fetch(url);
+async function fetchJson(url, options) {
+  const res = await fetch(url, options);
   if (!res.ok) {
     const err = await res.json().catch(() => ({ detail: res.statusText }));
-    throw new Error(err.detail || res.statusText);
+    const detail = err.detail;
+    const msg =
+      typeof detail === "string"
+        ? detail
+        : Array.isArray(detail)
+          ? detail.map((d) => d.msg || JSON.stringify(d)).join("; ")
+          : err.message || res.statusText;
+    throw new Error(msg || res.statusText);
   }
-  return res.json();
+  if (res.status === 204) return null;
+  const ct = res.headers.get("content-type") || "";
+  if (ct.includes("application/json")) return res.json();
+  return res;
 }
 
 function showError(msg) {
@@ -218,6 +228,7 @@ function computeNodeIssues() {
 
   const inventory = currentFunctionInventory?.inventory || [];
   inventory.forEach((row, idx) => {
+    if (row.is_false_positive) return;
     if (
       ![
         "UNPROTECTED_ALLOCATION",
@@ -934,20 +945,31 @@ function renderFunctionInventoryCard(inventory) {
     allocating > 0 && recycleAmongAllocators < 50
       ? `<p class="score-hint coverage-warning" role="status"><strong>${recycleAmongAllocators}%</strong> of allocators actually clean up — handle-table risk remains high despite the blended safety rate.</p>`
       : "";
+  const fpInv = (inventory.inventory || []).filter((f) => f.is_false_positive).length;
   const rows = (inventory.inventory || [])
-    .map(
-      (f, idx) =>
-        `<tr class="inventory-row ${inventoryStatusClass(f.status)}" data-inventory-idx="${idx}" role="button" tabindex="0">
+    .map((f, idx) => {
+      const fpBadge = f.is_false_positive
+        ? ` <span class="ai-badge ai-badge-fp">False Positive</span>`
+        : f.ai_validation_status === "VERIFIED"
+          ? ` <span class="ai-badge ai-badge-verified">AI Verified</span>`
+          : f.ai_validation_status === "VERIFIED_NON_LOOP"
+            ? ` <span class="ai-badge ai-badge-verified">Non-loop</span>`
+            : "";
+      return `<tr class="inventory-row ${inventoryStatusClass(f.status)}${
+        f.is_false_positive ? " is-fp" : ""
+      }" data-inventory-idx="${idx}" role="button" tabindex="0">
           <td><code>${escapeHtml(f.id)}</code></td>
-          <td><code>${escapeHtml(f.function_name)}</code></td>
+          <td><code>${escapeHtml(f.function_name)}</code>${fpBadge}</td>
           <td>${escapeHtml(f.design_element)}</td>
           <td>${escapeHtml(f.language)}</td>
           <td>${f.allocates_handles ? "Yes" : "No"}</td>
           <td>${f.recycle_call_count}</td>
-          <td><span class="status-pill ${inventoryStatusClass(f.status)}">${escapeHtml(inventoryStatusLabel(f.status))}</span></td>
+          <td><span class="status-pill ${inventoryStatusClass(f.status)}">${escapeHtml(
+            inventoryStatusLabel(f.status)
+          )}</span></td>
           <td>${f.loc}</td>
-        </tr>`
-    )
+        </tr>`;
+    })
     .join("");
 
   const rateExplainer = `
@@ -1001,12 +1023,17 @@ function renderFunctionInventoryCard(inventory) {
               <div class="metric"><span class="metric-label">Partial / conditional</span><strong>${incomplete}</strong></div>
               <div class="metric"><span class="metric-label">Unprotected</span><strong>${unprotected}</strong></div>
               <div class="metric"><span class="metric-label">Recycle among allocators</span><strong>${recycleAmongAllocators}%</strong></div>
+              ${
+                fpInv
+                  ? `<div class="metric"><span class="metric-label">False positives</span><strong>${fpInv}</strong></div>`
+                  : ""
+              }
             </div>
           </div>
         </div>
         ${allocatorCleanupWarning}
         ${rateExplainer}
-        <p class="score-hint coverage-hint">Click a table row for As-Is / To-Be deep-dive with the allocation line highlighted.</p>
+        <p class="score-hint coverage-hint">Click a table row for As-Is / To-Be deep-dive. Use <strong>Run AI Discrepancy Audit</strong> to review inventory false positives, or mark FP on a row. Human marks persist across refreshes.</p>
         ${
           rows
             ? `<table class="overview-table inventory-table"><thead><tr><th>ID</th><th>Function</th><th>Design element</th><th>Lang</th><th>Allocates</th><th>Recycles</th><th>Status</th><th>LOC</th></tr></thead><tbody>${rows}</tbody></table>`
@@ -1042,6 +1069,22 @@ function renderInventoryDeepDive(fn) {
       : status === "PROTECTED"
         ? "LOW"
         : "MEDIUM");
+  const aiBanner =
+    fn.ai_validation_status || fn.ai_validation_reasoning
+      ? `<div class="ai-note ${
+          fn.is_false_positive ? "ai-note-fp" : "ai-note-verified"
+        }" role="status">
+        <strong>${
+          fn.is_false_positive
+            ? "False positive"
+            : fn.ai_validation_status === "VERIFIED_NON_LOOP"
+              ? "AI: non-loop hygiene"
+              : "AI validation"
+        }${fn.triage_source ? ` · ${escapeHtml(fn.triage_source)}` : ""}</strong>
+        <p>${escapeHtml(fn.ai_validation_reasoning || fn.ai_validation_status || "")}</p>
+      </div>`
+      : "";
+  const fpBtnLabel = fn.is_false_positive ? "Clear false positive" : "Mark as false positive";
 
   return `
     <div class="deep-dive-header">
@@ -1056,6 +1099,15 @@ function renderInventoryDeepDive(fn) {
         </p>
       </div>
       <button type="button" class="deep-dive-close" id="inventoryDeepDiveClose">Close</button>
+    </div>
+
+    ${aiBanner}
+
+    <div class="triage-actions">
+      <button type="button" class="ai-run-btn" id="inventoryMarkFpBtn" data-fn-id="${escapeHtml(
+        fn.id
+      )}" data-is-fp="${fn.is_false_positive ? "1" : "0"}">${fpBtnLabel}</button>
+      <span class="score-hint">Persists on this graph — survives Refresh analysis.</span>
     </div>
 
     <div class="deep-dive-guides">
@@ -1096,7 +1148,57 @@ function openInventoryDeepDive(idx) {
     dive.classList.add("hidden");
     dive.innerHTML = "";
   });
+  document.getElementById("inventoryMarkFpBtn")?.addEventListener("click", async (ev) => {
+    ev.stopPropagation();
+    const btn = ev.currentTarget;
+    const id = btn.dataset.fnId;
+    const currentlyFp = btn.dataset.isFp === "1";
+    btn.disabled = true;
+    try {
+      await postTriage("inventory", id, !currentlyFp);
+      const row = currentFunctionInventory.inventory.find((r) => r.id === id);
+      if (row) {
+        row.is_false_positive = !currentlyFp;
+        row.triage_source = "human";
+        row.ai_validation_status = !currentlyFp ? "FALSE_POSITIVE" : "";
+        if (!currentlyFp) {
+          row.risk_severity = "LOW";
+          row.ai_validation_reasoning =
+            row.ai_validation_reasoning || "Marked false positive by reviewer.";
+        }
+      }
+      // Reload inventory from API so summary ring reflects overrides
+      const graphId = graphSelect.value;
+      if (graphId) {
+        currentFunctionInventory = await fetchJson(
+          `/api/graphs/${graphId}/function-inventory`
+        ).catch(() => currentFunctionInventory);
+      }
+      renderCodeAnalysis();
+      openInventoryDeepDive(
+        (currentFunctionInventory.inventory || []).findIndex((r) => r.id === id)
+      );
+    } catch (err) {
+      showError(err.message || String(err));
+      btn.disabled = false;
+    }
+  });
   dive.scrollIntoView({ behavior: "smooth", block: "nearest" });
+}
+
+async function postTriage(kind, id, isFalsePositive, reason = "") {
+  const graphId = graphSelect.value;
+  if (!graphId) throw new Error("No graph selected");
+  return fetchJson(`/api/graphs/${encodeURIComponent(graphId)}/triage`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      kind,
+      id,
+      is_false_positive: !!isFalsePositive,
+      reason: reason || (isFalsePositive ? "Marked false positive by reviewer." : ""),
+    }),
+  });
 }
 
 function wireInventoryDeepDive() {
@@ -1294,7 +1396,7 @@ function renderCodeAuditCard(audit) {
             <span class="score-hint" id="aiValidationStatus">${
               audit.llm_enabled
                 ? `Verified ${verifiedCount} · FP ${fpCount} · Blind spots ${blindCount}`
-                : "Uses OpenAI for false positives, blind spots, and cross-module ownership (requires API key)."
+                : "Reviews findings + inventory for false positives, blind spots, and ownership (requires API key)."
             }</span>
           </div>
         </div>
@@ -1536,6 +1638,15 @@ function renderAuditDeepDive(finding) {
 
     ${aiValidationBanner(finding)}
 
+    <div class="triage-actions">
+      <button type="button" class="ai-run-btn" id="findingMarkFpBtn"
+        data-finding-id="${escapeHtml(finding.finding_id || finding.id)}"
+        data-is-fp="${finding.is_false_positive ? "1" : "0"}">
+        ${finding.is_false_positive ? "Clear false positive" : "Mark as false positive"}
+      </button>
+      <span class="score-hint">Persists on this graph — survives Refresh analysis.</span>
+    </div>
+
     <div class="diff-grid">
       <div class="diff-pane">
         <div class="diff-label as-is">As-Is (vulnerable) · highlight = L${escapeHtml(String(hitLine))}</div>
@@ -1561,6 +1672,42 @@ function openAuditDeepDive(idx) {
   document.getElementById("auditDeepDiveClose")?.addEventListener("click", () => {
     dive.classList.add("hidden");
     dive.innerHTML = "";
+  });
+  document.getElementById("findingMarkFpBtn")?.addEventListener("click", async (ev) => {
+    ev.stopPropagation();
+    const btn = ev.currentTarget;
+    const id = btn.dataset.findingId;
+    const currentlyFp = btn.dataset.isFp === "1";
+    btn.disabled = true;
+    try {
+      await postTriage("finding", id, !currentlyFp);
+      const f = (currentCodeAudit.findings || []).find(
+        (row) => (row.finding_id || row.id) === id
+      );
+      if (f) {
+        f.is_false_positive = !currentlyFp;
+        f.ai_validation_status = !currentlyFp ? "FALSE_POSITIVE" : f.ai_validation_status;
+        if (!currentlyFp) {
+          f.severity = "LOW";
+          f.ai_validation_reasoning =
+            f.ai_validation_reasoning || "Marked false positive by reviewer.";
+        }
+      }
+      const graphId = graphSelect.value;
+      if (graphId) {
+        currentCodeAudit = await fetchJson(`/api/graphs/${graphId}/code-audit`).catch(
+          () => currentCodeAudit
+        );
+      }
+      renderCodeAnalysis();
+      const newIdx = (currentCodeAudit.findings || []).findIndex(
+        (row) => (row.finding_id || row.id) === id
+      );
+      if (newIdx >= 0) openAuditDeepDive(newIdx);
+    } catch (err) {
+      showError(err.message || String(err));
+      btn.disabled = false;
+    }
   });
   dive.scrollIntoView({ behavior: "smooth", block: "nearest" });
 }
@@ -1629,10 +1776,14 @@ async function wireAiValidationButton() {
     const status = document.getElementById("aiValidationStatus");
     btn.disabled = true;
     btn.textContent = "Running AI audit…";
-    if (status) status.textContent = "Pass 1 false-positive filter + Pass 2 blind-spot detector…";
+    if (status) status.textContent = "Pass 1–3 findings + inventory FP review…";
     try {
       const audit = await fetchJson(`/api/graphs/${graphId}/code-audit?llm=true`);
       currentCodeAudit = audit;
+      // Inventory is re-analyzed with use_llm inside the same snapshot refresh
+      currentFunctionInventory = await fetchJson(
+        `/api/graphs/${graphId}/function-inventory`
+      ).catch(() => currentFunctionInventory);
       auditFindingFilter = "all";
       renderCodeAnalysis();
     } catch (err) {

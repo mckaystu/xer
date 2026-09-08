@@ -18,6 +18,8 @@ ALTER TABLE dxl_graphs ADD COLUMN IF NOT EXISTS business_rules JSONB;
 ALTER TABLE dxl_graphs ADD COLUMN IF NOT EXISTS modernization_score JSONB;
 ALTER TABLE dxl_graphs ADD COLUMN IF NOT EXISTS audit_snapshot JSONB;
 ALTER TABLE dxl_graphs ADD COLUMN IF NOT EXISTS audit_snapshot_at TIMESTAMPTZ;
+-- Human + AI triage (false-positive marks) — survives audit_snapshot refresh
+ALTER TABLE dxl_graphs ADD COLUMN IF NOT EXISTS triage_overrides JSONB;
 
 CREATE INDEX IF NOT EXISTS idx_dxl_graphs_nsf_path ON dxl_graphs (nsf_path);
 CREATE INDEX IF NOT EXISTS idx_dxl_graphs_parsed_at ON dxl_graphs (parsed_at DESC);
