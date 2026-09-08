@@ -283,12 +283,14 @@ End Sub
 
 
 # ---------------------------------------------------------------------------
-# LotusScript — DEFECTIVE (must fire expected rules)
+# LotusScript — handle/Delete rules are NOT part of Handle Exhaustion
 # ---------------------------------------------------------------------------
 
 
-class TestLotusScriptDefectPatterns:
-    def test_loop_getnext_without_delete(self):
+class TestLotusScriptHandleRulesDisabled:
+    """LS-DOM-* detectors are unwired; LotusScript ≠ C-API handle exhaustion."""
+
+    def test_loop_getnext_without_delete_does_not_emit_ls_dom(self):
         unit = ls(
             "LeakLoop",
             """
@@ -303,14 +305,12 @@ End Sub
 """,
         )
         hit = rules(unit)
-        assert "LS-DOM-001" in hit
+        assert not any(r.startswith("LS-DOM") for r in hit)
+        assert "DOM-002" not in hit
+        # Inventory helpers may still classify LS bodies; ring excludes them in production path
         assert inventory_status(unit, "Initialize") == "UNPROTECTED_ALLOCATION"
-        f = findings_for(unit, "LS-DOM-001")[0]
-        assert f.severity == "CRITICAL"
-        assert f.confidence >= 90
-        assert "Delete" in (f.code_snippet_to_be or "")
 
-    def test_do_until_getnext_without_delete(self):
+    def test_do_until_getnext_without_delete_does_not_emit_ls_dom(self):
         unit = ls(
             "DoUntilLeak",
             """
@@ -324,9 +324,9 @@ Sub Initialize
 End Sub
 """,
         )
-        assert "LS-DOM-001" in rules(unit)
+        assert not any(r.startswith("LS-DOM") for r in rules(unit))
 
-    def test_in_loop_getdocumentbyunid_without_delete(self):
+    def test_in_loop_lookups_do_not_emit_ls_dom(self):
         unit = ls(
             "LookupLeak",
             """
@@ -345,53 +345,9 @@ Sub Initialize
 End Sub
 """,
         )
-        assert "LS-DOM-002" in rules(unit)
-        f = findings_for(unit, "LS-DOM-002")[0]
-        # LotusScript hygiene — not C-API handle-exhaustion CRITICAL promotion
-        assert f.severity == "HIGH"
+        assert not any(r.startswith("LS-DOM") for r in rules(unit))
 
-    def test_in_loop_createdocument_without_delete(self):
-        unit = ls(
-            "CreateLeak",
-            """
-Sub Initialize
-    Dim doc As NotesDocument
-    Dim nextDoc As NotesDocument
-    Dim newDoc As NotesDocument
-    Set doc = view.GetFirstDocument()
-    Do While Not doc Is Nothing
-        Set nextDoc = view.GetNextDocument(doc)
-        Set newDoc = db.CreateDocument()
-        Call newDoc.ReplaceItemValue("Form", "Memo")
-        Delete doc
-        Set doc = nextDoc
-    Loop
-End Sub
-""",
-        )
-        assert "LS-DOM-002" in rules(unit)
-
-    def test_in_loop_getdocumentbykey_without_delete(self):
-        unit = ls(
-            "KeyLeak",
-            """
-Sub Initialize
-    Dim doc As NotesDocument
-    Dim nextDoc As NotesDocument
-    Dim hit As NotesDocument
-    Set doc = view.GetFirstDocument()
-    Do While Not doc Is Nothing
-        Set nextDoc = view.GetNextDocument(doc)
-        Set hit = lookupView.GetDocumentByKey(doc.GetItemValue("Key"), True)
-        Delete doc
-        Set doc = nextDoc
-    Loop
-End Sub
-""",
-        )
-        assert "LS-DOM-002" in rules(unit)
-
-    def test_public_notes_document_database_view(self):
+    def test_public_notes_handles_do_not_emit_ls_dom(self):
         unit = ls(
             "OpenLog",
             """
@@ -404,12 +360,9 @@ Public gName As String
             element_type="scriptlibrary",
             event="declarations",
         )
-        hits = findings_for(unit, "LS-DOM-003")
-        assert len(hits) == 3
-        assert all(f.severity == "CRITICAL" for f in hits)
-        assert all(f.confidence >= 95 for f in hits)
+        assert findings_for(unit, "LS-DOM-003") == []
 
-    def test_set_nothing_without_delete(self):
+    def test_set_nothing_does_not_emit_ls_dom(self):
         unit = ls(
             "NothingLeak",
             """
@@ -421,12 +374,7 @@ Sub Initialize
 End Sub
 """,
         )
-        assert "LS-DOM-004" in rules(unit)
-        f = findings_for(unit, "LS-DOM-004")[0]
-        # Catalog MEDIUM — not demoted via C-API loop calibration (LS ≠ handle exhaustion)
-        assert f.severity == "MEDIUM"
-        assert "Delete" in (f.code_snippet_to_be or "")
-        assert "GetNextDocument" not in (f.code_snippet_to_be or "")
+        assert "LS-DOM-004" not in rules(unit)
 
     def test_java_recycle_rules_do_not_fire_on_lotusscript_loops(self):
         unit = ls(
@@ -445,7 +393,7 @@ End Sub
         assert "DOM-002" not in hit
         assert "DOM-013" not in hit
         assert "DOM-010" not in hit
-        assert "LS-DOM-001" in hit
+        assert "LS-DOM-001" not in hit
 
 
 # ---------------------------------------------------------------------------
@@ -849,9 +797,8 @@ Public gDoc As NotesDocument
         assert ids == sorted(ids) or len(ids) == len(set(ids))
         assert all(f.id.startswith("F-") for f in findings)
         rule_ids = {f.rule_id for f in findings}
-        assert "LS-DOM-001" in rule_ids
+        assert not any(r.startswith("LS-DOM") for r in rule_ids)
         assert "DOM-001" in rule_ids
-        assert "LS-DOM-003" in rule_ids
 
 
 # ---------------------------------------------------------------------------
@@ -860,10 +807,11 @@ Public gDoc As NotesDocument
 
 
 class TestAdvancedHandleAndPerfRules:
-    def test_ls_dom005_item_in_loop(self):
-        unit = ls(
-            "ItemLeak",
-            """
+    def test_ls_dom_advanced_rules_not_emitted(self):
+        for name, body in (
+            (
+                "ItemLeak",
+                """
 Sub Initialize
   Dim doc As NotesDocument
   Dim item As NotesItem
@@ -877,25 +825,19 @@ Sub Initialize
   Loop
 End Sub
 """,
-        )
-        assert "LS-DOM-005" in rules(unit)
-
-    def test_ls_dom006_viewnav(self):
-        unit = ls(
-            "NavLeak",
-            """
+            ),
+            (
+                "NavLeak",
+                """
 Sub Initialize
   Dim nav As NotesViewNavigator
   Set nav = view.CreateViewNav()
 End Sub
 """,
-        )
-        assert "LS-DOM-006" in rules(unit)
-
-    def test_ls_dom007_error_handler(self):
-        unit = ls(
-            "ErrLeak",
-            """
+            ),
+            (
+                "ErrLeak",
+                """
 Sub Initialize
   On Error GoTo Fail
   Dim doc As NotesDocument
@@ -905,13 +847,10 @@ Fail:
   Exit Sub
 End Sub
 """,
-        )
-        assert "LS-DOM-007" in rules(unit)
-
-    def test_ls_dom008_search_in_loop(self):
-        unit = ls(
-            "SearchLeak",
-            """
+            ),
+            (
+                "SearchLeak",
+                """
 Sub Initialize
   Dim doc As NotesDocument
   Dim coll As NotesDocumentCollection
@@ -922,8 +861,9 @@ Sub Initialize
   Loop
 End Sub
 """,
-        )
-        assert "LS-DOM-008" in rules(unit)
+            ),
+        ):
+            assert not any(r.startswith("LS-DOM") for r in rules(ls(name, body)))
 
     def test_dom014_mime(self):
         unit = java(

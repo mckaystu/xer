@@ -33,7 +33,7 @@ DXL / ODP / application graph
    Extractor (language-tagged code units)
         │
         ▼
-   Rule engines ──► DOM-* / LS-DOM-* / PERF-* / SEC-*
+   Rule engines ──► DOM-* / PERF-* / SEC-* / FORM-*  (LS-DOM-* unwired)
         │
         ├── Function Inventory (SAFE / PROTECTED / UNPROTECTED)
         │
@@ -47,7 +47,8 @@ DXL / ODP / application graph
 
 - Allocation **inside** a Java/SSJS collection loop → **CRITICAL** (C-API handle exhaustion)
 - One-shot Java/SSJS helpers → **LOW** / **MEDIUM** (routine hygiene)
-- **LotusScript is outside Handle Exhaustion** — LS-DOM-* may still appear under “LotusScript hygiene” but do **not** drive `handle_exhaustion_risk`, the inventory ring, or graph exhaustion badges
+- **LotusScript is out of scope** — `LS-DOM-*` detectors are **not wired**; Handle Exhaustion covers Java / SSJS / XPages only
+
 
 ---
 
@@ -68,20 +69,9 @@ DXL / ODP / application graph
 | DOM-015 | Un-recycled ViewNavigator / ViewEntryCollection |
 | DOM-016 | `search` / `FTSearch` collection leaks in loops |
 
-### LotusScript Delete hygiene (`LS-DOM-001` … `LS-DOM-008`) — *not exhaustion*
+### LotusScript (`LS-DOM-001` … `LS-DOM-008`) — *disabled*
 
-LotusScript object lifetimes do not map 1:1 to Java C-API handle-table exhaustion. These rules remain available for Delete hygiene review but are **excluded** from Handle Exhaustion Risk / inventory / badges.
-
-| ID | Focus |
-|----|--------|
-| LS-DOM-001 | Loop iteration without `Delete` |
-| LS-DOM-002 | In-loop lookup / `CreateDocument` leaks |
-| LS-DOM-003 | Public module-level Notes* handles |
-| LS-DOM-004 | `Set … = Nothing` without `Delete` |
-| LS-DOM-005 | Item / MIME / RichText without `Delete` |
-| LS-DOM-006 | ViewNavigator / ViewEntryCollection without `Delete` |
-| LS-DOM-007 | Error handler exits without cleanup |
-| LS-DOM-008 | In-loop `Search` / `FTSearch` collection leaks |
+LotusScript object lifetimes do not map to Java C-API handle-table exhaustion. Detectors remain in `ls_rules.py` for reference but are **not** registered in `run_rule_engine` and do not appear in the UI.
 
 ### Performance & NIF (`PERF-001` … `PERF-003`)
 
@@ -240,7 +230,7 @@ python3 domino_dxl_auditor.py --graph application_graph.json --out-dir analysis
 
 Against `dxl_input_fromboss/Code_FrombossRest.dxl`:
 
-- **`EncodeBase64`**: `LS-DOM-004` at catalog **MEDIUM** (LotusScript hygiene; not Handle Exhaustion)
+- **`EncodeBase64`**: no `LS-DOM-*` findings (LotusScript out of Handle Exhaustion scope)
 - **`upgrade_scan`**: LotusScript DB refs only; **0** false Java `getDatabase` counts
 - **SEC-001 / SEC-002**: fire on hardcoded HTTP credentials and query-driven UNID lookups where present
 

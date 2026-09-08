@@ -1,7 +1,8 @@
-"""LotusScript-native Domino handle lifecycle detectors (LS-DOM-001..004).
+"""LotusScript-native Domino handle lifecycle detectors (LS-DOM-001..008).
 
-These rules evaluate LotusScript using ``Delete`` / variable-scope semantics
-rather than Java ``.recycle()`` / try-finally mechanics.
+These detectors are retained for reference but are **not wired** into
+``run_rule_engine``. LotusScript object lifetimes do not map to Java C-API
+handle-table exhaustion; Handle Exhaustion covers Java / SSJS / XPages only.
 """
 
 from __future__ import annotations

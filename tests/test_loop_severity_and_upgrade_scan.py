@@ -31,7 +31,7 @@ def ls(name: str, body: str) -> CodeUnit:
 
 
 class TestLoopAwareSeverity:
-    def test_encode_base64_is_ls_hygiene_not_exhaustion(self):
+    def test_encode_base64_emits_no_ls_dom(self):
         unit = ls(
             "EncodeBase64",
             """
@@ -49,13 +49,8 @@ End Function
 """,
         )
         findings = run_rule_engine([unit])
-        assert findings
-        assert any(f.rule_id == "LS-DOM-004" and f.severity == "MEDIUM" for f in findings)
-        rem = findings[0].remediation or findings[0].code_snippet_to_be
-        assert "GetNextDocument" not in rem
-        assert "Delete" in rem
+        assert not any(f.rule_id.startswith("LS-DOM") for f in findings)
 
-        # build_inventory can still classify LS units for hygiene; Handle Exhaustion ring uses run_function_inventory
         from analytics.code_auditor.function_inventory import summarize_inventory
 
         inv = build_inventory([unit])
@@ -63,7 +58,7 @@ End Function
         assert summary.get("lotus_script_functions_excluded", 0) >= 1
         assert summary["total_functions_scanned"] == 0
 
-    def test_loop_leak_stays_critical(self):
+    def test_loop_leak_emits_no_ls_dom(self):
         unit = ls(
             "LoopLeak",
             """
@@ -78,9 +73,7 @@ End Sub
 """,
         )
         findings = run_rule_engine([unit])
-        ls001 = [f for f in findings if f.rule_id == "LS-DOM-001"]
-        assert ls001
-        assert ls001[0].severity == "CRITICAL"
+        assert not any(f.rule_id.startswith("LS-DOM") for f in findings)
 
     def test_calibrate_helper(self):
         # LotusScript rules are not loop-calibrated for C-API exhaustion

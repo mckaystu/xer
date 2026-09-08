@@ -1,7 +1,8 @@
-"""Deterministic rule regression tests for DOM-* and LS-DOM-* detectors.
+"""Deterministic rule regression tests for DOM-* detectors (Handle Exhaustion).
 
-Loads annotated fixtures from ``fixtures/lotusscript_samples.lss`` and
-``fixtures/java_ssjs_samples.java`` and asserts @expect / @forbid contracts.
+LS-DOM-* is not wired into the auditor — LotusScript is out of scope for
+C-API handle exhaustion. LotusScript fixtures still exercise PERF/SEC and
+confirm no LS-DOM findings are emitted.
 """
 
 from __future__ import annotations
@@ -12,7 +13,7 @@ from analytics.code_auditor.models import RULE_CATALOG
 from tests.audit.conftest import FixtureCase, case_to_unit, rule_ids
 
 
-class TestLotusScriptHandleRules:
+class TestLotusScriptHandleRulesDisabled:
     def test_fixture_cases_present(self, lotusscript_cases: list[FixtureCase]):
         ids = {c.case_id for c in lotusscript_cases}
         for required in (
@@ -26,44 +27,35 @@ class TestLotusScriptHandleRules:
             assert required in ids
 
     @pytest.mark.parametrize(
-        "case_id,rule",
+        "case_id",
         [
-            ("ls_dom001_leak", "LS-DOM-001"),
-            ("ls_dom002_lookup_leak", "LS-DOM-002"),
-            ("ls_dom003_public", "LS-DOM-003"),
-            ("ls_dom004_set_nothing", "LS-DOM-004"),
-            ("ls_dom005_item_leak", "LS-DOM-005"),
-            ("ls_dom006_viewnav_leak", "LS-DOM-006"),
-            ("ls_dom007_error_bypass", "LS-DOM-007"),
-            ("ls_dom008_search_in_loop", "LS-DOM-008"),
+            "ls_dom001_leak",
+            "ls_dom002_lookup_leak",
+            "ls_dom003_public",
+            "ls_dom004_set_nothing",
+            "ls_dom005_item_leak",
+            "ls_dom006_viewnav_leak",
+            "ls_dom007_error_bypass",
+            "ls_dom008_search_in_loop",
+            "ls_dom001_ok",
+            "ls_dom007_error_ok",
+            "ls_safe_no_handles",
         ],
     )
-    def test_positive_expect(self, ls_cases_by_id: dict[str, FixtureCase], case_id: str, rule: str):
+    def test_ls_dom_not_emitted(self, ls_cases_by_id: dict[str, FixtureCase], case_id: str):
         case = ls_cases_by_id[case_id]
         hit = rule_ids(case_to_unit(case))
-        assert rule in hit, f"{case_id}: expected {rule}, got {sorted(hit)}"
+        assert not any(r.startswith("LS-DOM") for r in hit), f"{case_id}: unexpected LS-DOM in {sorted(hit)}"
 
-    @pytest.mark.parametrize(
-        "case_id,rule",
-        [
-            ("ls_dom001_ok", "LS-DOM-001"),
-            ("ls_dom007_error_ok", "LS-DOM-007"),
-            ("ls_safe_no_handles", "LS-DOM-001"),
-        ],
-    )
-    def test_negative_forbid(self, ls_cases_by_id: dict[str, FixtureCase], case_id: str, rule: str):
-        case = ls_cases_by_id[case_id]
-        hit = rule_ids(case_to_unit(case))
-        assert rule not in hit, f"{case_id}: unexpected {rule} in {sorted(hit)}"
-
-    def test_annotation_contracts(self, lotusscript_cases: list[FixtureCase]):
-        """Every LS fixture case honors its @expect / @forbid tags for handle rules."""
+    def test_annotation_contracts_ignore_ls_dom_expect(self, lotusscript_cases: list[FixtureCase]):
+        """PERF/SEC contracts still apply; LS-DOM @expect tags are ignored (detectors unwired)."""
         for case in lotusscript_cases:
-            expect = case.expect - {"PERF-001", "PERF-002", "PERF-003", "PERF-004"}
-            forbid = case.forbid - {"PERF-001", "PERF-002", "PERF-003", "PERF-004"}
+            hit = rule_ids(case_to_unit(case))
+            assert not any(r.startswith("LS-DOM") for r in hit), f"{case.case_id}: LS-DOM emitted"
+            expect = {r for r in case.expect if r.startswith(("PERF-", "SEC-", "FORM-"))}
+            forbid = {r for r in case.forbid if r.startswith(("PERF-", "SEC-", "FORM-", "DOM-"))}
             if not expect and not forbid:
                 continue
-            hit = rule_ids(case_to_unit(case))
             missing = expect - hit
             unexpected = forbid & hit
             assert not missing, f"{case.case_id}: missing {sorted(missing)}; hit={sorted(hit)}"
@@ -118,6 +110,8 @@ class TestJavaHandleRules:
         for case in java_cases:
             expect = case.expect - {"PERF-001", "PERF-002", "PERF-003", "PERF-004"}
             forbid = case.forbid - {"PERF-001", "PERF-002", "PERF-003", "PERF-004"}
+            expect = {r for r in expect if not r.startswith("LS-DOM")}
+            forbid = {r for r in forbid if not r.startswith("LS-DOM")}
             if not expect and not forbid:
                 continue
             hit = rule_ids(case_to_unit(case))
@@ -131,14 +125,15 @@ class TestCatalogCoverage:
     def test_handle_rules_registered(self):
         for rid in (
             *(f"DOM-{i:03d}" for i in range(1, 17)),
-            *(f"LS-DOM-{i:03d}" for i in range(1, 9)),
+            *(f"LS-DOM-{i:03d}" for i in range(1, 9)),  # catalog retained; detectors unwired
         ):
             assert rid in RULE_CATALOG, f"missing catalog entry {rid}"
 
-    def test_mock_graph_fires_advanced_rules(self, mock_xboss_graph: dict):
+    def test_mock_graph_no_ls_dom_java_advanced_rules_fire(self, mock_xboss_graph: dict):
         from analytics.code_auditor import run_audit
 
         report = run_audit(graph=mock_xboss_graph, use_llm=False)
         ids = {f.rule_id for f in report.findings}
-        for rid in ("LS-DOM-001", "LS-DOM-005", "LS-DOM-007", "DOM-014", "DOM-015", "DOM-016"):
+        assert not any(r.startswith("LS-DOM") for r in ids), f"unexpected LS-DOM: {sorted(ids)}"
+        for rid in ("DOM-014", "DOM-015", "DOM-016"):
             assert rid in ids, f"mock graph missing {rid}; got {sorted(ids)}"

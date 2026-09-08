@@ -844,7 +844,6 @@ def run_rule_engine(
 ) -> list[Finding]:
     from analytics.code_auditor.form_rules import FORM_DETECTORS
     from analytics.code_auditor.form_rules import bind_helpers as bind_form
-    from analytics.code_auditor.ls_rules import LS_DETECTORS, bind_helpers
     from analytics.code_auditor.ownership_rules import bind_helpers as bind_own
     from analytics.code_auditor.ownership_rules import run_ownership_detectors
     from analytics.code_auditor.perf_rules import PERF_DETECTORS
@@ -853,7 +852,7 @@ def run_rule_engine(
     from analytics.code_auditor.sec_rules import bind_helpers as bind_sec
 
     unit_list = list(units)
-    bind_helpers(finding=_finding, line_of=_line_of, snippet=_snippet)
+    # LS-DOM-* detectors are not wired: LotusScript does not share Java C-API handle exhaustion.
     bind_perf(finding=_finding, line_of=_line_of, snippet=_snippet)
     bind_sec(finding=_finding, line_of=_line_of, snippet=_snippet)
     bind_form(finding=_finding, line_of=_line_of, snippet=_snippet)
@@ -861,11 +860,8 @@ def run_rule_engine(
 
     findings: list[Finding] = []
     for unit in unit_list:
-        # Strict language gating: Java detectors skip LotusScript units and vice versa
-        # (individual detectors also gate; this keeps SEC/PERF universal).
+        # Handle Exhaustion: Java / SSJS / XPages (DETECTORS). SEC/PERF/FORM remain universal.
         for detector in DETECTORS:
-            findings.extend(detector(unit))
-        for detector in LS_DETECTORS:
             findings.extend(detector(unit))
         for detector in PERF_DETECTORS:
             findings.extend(detector(unit))

@@ -2,15 +2,14 @@
 """
 Domino DXL Code Analysis & AI Quality Auditor
 
-Scans DXL exports or On-Disk Project sources for Domino C-API handle leaks,
-ODA vs lotus.domino conflicts, static handle lifetime bugs, Item/MIME/ViewNav
-lifecycle gaps (DOM-014..016, LS-DOM-005..008), Performance & NIF anti-patterns
-(PERF-001..003), and basic security rules (SEC-001/002). Severity is loop-aware:
-collection-loop leaks are CRITICAL; one-shot helpers (e.g. EncodeBase64) are
-MEDIUM/LOW hygiene findings with linear Delete/try-finally templates.
-With ``--llm``, runs a three-pass AI discrepancy audit (FP filter with
-VERIFIED_NON_LOOP demotion, blind spots, cross-module ownership). Emits a
-console summary plus Markdown/JSON reports.
+Scans DXL exports or On-Disk Project sources for Domino C-API handle leaks
+(Java / SSJS / XPages), ODA vs lotus.domino conflicts, static handle lifetime
+bugs, Item/MIME/ViewNav lifecycle gaps (DOM-014..016), Performance & NIF
+anti-patterns (PERF-001..003), and basic security rules (SEC-001/002).
+LotusScript Delete/handle detectors (LS-DOM-*) are not wired — LS does not
+share the Java C-API handle-exhaustion model. Severity is loop-aware for
+Java/JS recycle rules. With ``--llm``, runs a three-pass AI discrepancy audit.
+Emits a console summary plus Markdown/JSON reports.
 
 Setup
 -----
