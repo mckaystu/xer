@@ -1093,6 +1093,14 @@ th { color: var(--muted); font-weight: 500; }
   box-sizing: border-box;
 }
 
+.code-cache-bar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.75rem 1rem;
+  margin: 0.75rem 0 1.25rem;
+}
+
 .ai-run-btn {
   border: 1px solid rgba(91, 159, 212, 0.55);
   background: rgba(91, 159, 212, 0.12);

@@ -1398,6 +1398,38 @@ function renderCodeAuditTeaser(audit, inventory) {
   `;
 }
 
+function formatCachedAt(iso) {
+  if (!iso) return "";
+  try {
+    const d = new Date(iso);
+    if (Number.isNaN(d.getTime())) return String(iso);
+    return d.toLocaleString();
+  } catch {
+    return String(iso);
+  }
+}
+
+function renderCodeAnalysisCacheBar() {
+  const cached =
+    (currentCodeAudit && currentCodeAudit.cached) ||
+    (currentFunctionInventory && currentFunctionInventory.cached);
+  const at =
+    (currentCodeAudit && currentCodeAudit.cached_at) ||
+    (currentFunctionInventory && currentFunctionInventory.cached_at) ||
+    "";
+  const status = cached
+    ? `Loaded from saved analysis${at ? ` · ${formatCachedAt(at)}` : ""} — reopen is fast until you refresh.`
+    : at
+      ? `Analysis saved${at ? ` · ${formatCachedAt(at)}` : ""} for faster reloads.`
+      : "First open runs the analyzer; the result is saved for faster reloads.";
+  return `
+    <div class="code-cache-bar" role="status">
+      <span class="score-hint">${escapeHtml(status)}</span>
+      <button type="button" class="ai-run-btn" id="refreshAnalysisBtn">Refresh analysis</button>
+    </div>
+  `;
+}
+
 function renderCodeAnalysis() {
   if (!codeAnalysisContent) return;
   if (!currentCodeAudit && !currentFunctionInventory) {
@@ -1409,6 +1441,7 @@ function renderCodeAnalysis() {
     <div class="overview-header">
       <h2>Code Analysis</h2>
       <p class="overview-sub">Java / SSJS / XPages C-API <code>.recycle()</code> inventory and findings only — LotusScript is out of scope. Click a finding for As-Is / To-Be remediation.</p>
+      ${renderCodeAnalysisCacheBar()}
     </div>
     ${renderFunctionInventoryCard(currentFunctionInventory)}
     ${renderCodeAuditCard(currentCodeAudit)}
@@ -1418,6 +1451,7 @@ function renderCodeAnalysis() {
   wireAuditFindingFilters();
   wireAiValidationButton();
   wireExportChecklistButton();
+  wireRefreshAnalysisButton();
   if (pendingDeepDive) {
     const pending = pendingDeepDive;
     pendingDeepDive = null;
@@ -1563,6 +1597,24 @@ function wireExportChecklistButton() {
   });
 }
 
+function wireRefreshAnalysisButton() {
+  const btn = document.getElementById("refreshAnalysisBtn");
+  if (!btn) return;
+  btn.addEventListener("click", async () => {
+    const graphId = graphSelect.value;
+    if (!graphId) return;
+    btn.disabled = true;
+    btn.textContent = "Refreshing…";
+    try {
+      await loadSummary(graphId, { refreshAnalysis: true });
+    } catch (err) {
+      showError(err.message || String(err));
+      btn.disabled = false;
+      btn.textContent = "Refresh analysis";
+    }
+  });
+}
+
 async function wireAiValidationButton() {
   const btn = document.getElementById("runAiValidationBtn");
   if (!btn || btn.disabled) return;
@@ -1704,16 +1756,26 @@ function renderOverview(summary) {
   });
 }
 
-async function loadSummary(graphId) {
+async function loadSummary(graphId, opts = {}) {
+  const refreshAnalysis = !!opts.refreshAnalysis;
   try {
-    overviewContent.innerHTML = `<p class="placeholder">Loading application analysis…</p>`;
-    const [summary, analysis, codeAudit, functionInventory, trendPayload] = await Promise.all([
+    overviewContent.innerHTML = `<p class="placeholder">${
+      refreshAnalysis ? "Re-running code analysis…" : "Loading application analysis…"
+    }</p>`;
+    if (refreshAnalysis && codeAnalysisContent && activeView === "code") {
+      codeAnalysisContent.innerHTML = `<div class="overview-header"><h2>Code Analysis</h2></div><p class="placeholder">Re-running analyzer and updating saved results…</p>`;
+    }
+    const [summary, analysis, trendPayload] = await Promise.all([
       fetchJson(`/api/graphs/${graphId}/summary`),
       fetchJson(`/api/graphs/${graphId}/analysis`).catch(() => null),
-      fetchJson(`/api/graphs/${graphId}/code-audit`).catch(() => null),
-      fetchJson(`/api/graphs/${graphId}/function-inventory`).catch(() => null),
       fetchJson(`/api/graphs/${graphId}/audit-trends`).catch(() => null),
     ]);
+    // Sequential: first call may compute+cache both; inventory then hits Neon cache.
+    const refreshQ = refreshAnalysis ? "?refresh=true" : "";
+    const codeAudit = await fetchJson(`/api/graphs/${graphId}/code-audit${refreshQ}`).catch(() => null);
+    const functionInventory = await fetchJson(
+      `/api/graphs/${graphId}/function-inventory${refreshQ}`
+    ).catch(() => null);
     currentSummary = summary;
     currentAnalysis = analysis;
     currentCodeAudit = codeAudit;

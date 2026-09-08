@@ -136,15 +136,25 @@ def api_graph_code_audit(
         False,
         description="Run AI discrepancy audit (false-positive filter + blind-spot detector) when OPENAI_API_KEY is set",
     ),
+    refresh: bool = Query(
+        False,
+        description="Force re-analyze even when a cached Code Analysis result exists",
+    ),
 ) -> dict[str, Any]:
     """Static Domino handle/memory anti-pattern audit for code stored in the graph.
+
+    By default returns a Neon-cached result when available (fast reload). Use
+    ``refresh=true`` or ``llm=true`` to recompute.
 
     When ``llm=true``, also returns AI verification metadata on each finding:
     ``ai_validation_status``, ``ai_validation_reasoning``, ``is_blind_spot``,
     ``is_false_positive``, plus report-level ``ai_discrepancy_summary``.
     """
-    from analytics.code_auditor import run_audit
-    from neon_db import get_graph
+    from neon_db import (
+        cached_code_audit_from_row,
+        ensure_audit_snapshot,
+        get_graph,
+    )
 
     try:
         row = get_graph(graph_id)
@@ -153,37 +163,48 @@ def api_graph_code_audit(
     if not row:
         raise HTTPException(status_code=404, detail="Graph not found")
 
+    if not llm and not refresh:
+        cached = cached_code_audit_from_row(row)
+        if cached:
+            return cached
+
     try:
-        report = run_audit(
-            row.get("nsf_path") or graph_id,
-            graph=row["graph"],
+        result = ensure_audit_snapshot(
+            graph_id,
+            force=True,
             use_llm=llm,
-            out_dir=None,
+            include_findings=True,
         )
     except Exception as exc:  # noqa: BLE001
         raise HTTPException(status_code=422, detail=f"Code audit failed: {exc}") from exc
 
-    # Persist snapshot for trends; include full findings when LLM ran
-    try:
-        from neon_db import ensure_audit_snapshot
-
-        ensure_audit_snapshot(
-            graph_id,
-            force=True,
-            use_llm=llm,
-            include_findings=True if llm else None,
-        )
-    except Exception:  # noqa: BLE001
-        pass
-
-    return report.to_dict()
+    snap = (result or {}).get("audit_snapshot") or {}
+    payload = snap.get("code_audit")
+    if not isinstance(payload, dict):
+        raise HTTPException(status_code=422, detail="Code audit produced no cacheable payload")
+    out = dict(payload)
+    out["cached"] = False
+    out["cached_at"] = (result or {}).get("audit_snapshot_at") or snap.get("captured_at")
+    return out
 
 
 @app.get("/api/graphs/{graph_id}/function-inventory")
-def api_graph_function_inventory(graph_id: str) -> dict[str, Any]:
-    """Function inventory + recycle coverage rate for code stored in the graph."""
-    from analytics.code_auditor import run_function_inventory
-    from neon_db import get_graph
+def api_graph_function_inventory(
+    graph_id: str,
+    refresh: bool = Query(
+        False,
+        description="Force re-inventory even when a cached result exists",
+    ),
+) -> dict[str, Any]:
+    """Function inventory + recycle coverage rate for code stored in the graph.
+
+    Serves Neon cache when present; ``refresh=true`` recomputes and updates the cache.
+    """
+    from neon_db import (
+        cached_function_inventory_from_row,
+        ensure_audit_snapshot,
+        get_graph,
+    )
 
     try:
         row = get_graph(graph_id)
@@ -192,13 +213,24 @@ def api_graph_function_inventory(graph_id: str) -> dict[str, Any]:
     if not row:
         raise HTTPException(status_code=404, detail="Graph not found")
 
+    if not refresh:
+        cached = cached_function_inventory_from_row(row)
+        if cached:
+            return cached
+
     try:
-        return run_function_inventory(
-            row.get("nsf_path") or graph_id,
-            graph=row["graph"],
-        )
+        result = ensure_audit_snapshot(graph_id, force=True, include_findings=True)
     except Exception as exc:  # noqa: BLE001
         raise HTTPException(status_code=422, detail=f"Function inventory failed: {exc}") from exc
+
+    snap = (result or {}).get("audit_snapshot") or {}
+    payload = snap.get("function_inventory")
+    if not isinstance(payload, dict):
+        raise HTTPException(status_code=422, detail="Function inventory produced no cacheable payload")
+    out = dict(payload)
+    out["cached"] = False
+    out["cached_at"] = (result or {}).get("audit_snapshot_at") or snap.get("captured_at")
+    return out
 
 
 @app.get("/api/graphs/{graph_id}/code-audit.docx")
@@ -208,11 +240,20 @@ def api_graph_code_audit_docx(
         False,
         description="Include AI discrepancy metadata when OPENAI_API_KEY is set (same as code-audit)",
     ),
+    refresh: bool = Query(
+        False,
+        description="Force re-analyze before building the Word checklist",
+    ),
 ) -> Response:
     """Download a Word checklist of Code Analysis findings for developer remediation."""
-    from analytics.code_auditor import run_audit, run_function_inventory
     from analytics.code_auditor.docx_export import build_code_audit_checklist_docx, slug_filename
-    from neon_db import get_graph
+    from analytics.code_auditor.models import AuditReport, Finding
+    from neon_db import (
+        cached_code_audit_from_row,
+        cached_function_inventory_from_row,
+        ensure_audit_snapshot,
+        get_graph,
+    )
 
     try:
         row = get_graph(graph_id)
@@ -221,24 +262,69 @@ def api_graph_code_audit_docx(
     if not row:
         raise HTTPException(status_code=404, detail="Graph not found")
 
-    try:
-        report = run_audit(
-            row.get("nsf_path") or graph_id,
-            graph=row["graph"],
-            use_llm=llm,
-            out_dir=None,
-        )
-    except Exception as exc:  # noqa: BLE001
-        raise HTTPException(status_code=422, detail=f"Code audit failed: {exc}") from exc
+    if llm or refresh or not cached_code_audit_from_row(row):
+        try:
+            ensure_audit_snapshot(
+                graph_id,
+                force=True,
+                use_llm=llm,
+                include_findings=True,
+            )
+            row = get_graph(graph_id) or row
+        except Exception as exc:  # noqa: BLE001
+            raise HTTPException(status_code=422, detail=f"Code audit failed: {exc}") from exc
 
-    inventory: dict[str, Any] | None = None
-    try:
-        inventory = run_function_inventory(
-            row.get("nsf_path") or graph_id,
-            graph=row["graph"],
-        )
-    except Exception:  # noqa: BLE001
-        inventory = None
+    cached_audit = cached_code_audit_from_row(row)
+    inventory = cached_function_inventory_from_row(row)
+    if not cached_audit:
+        raise HTTPException(status_code=422, detail="No code audit available to export")
+
+    findings: list[Finding] = []
+    for fd in cached_audit.get("findings") or []:
+        try:
+            sev = str(fd.get("severity") or "MEDIUM").upper()
+            if sev not in {"CRITICAL", "HIGH", "MEDIUM", "LOW"}:
+                sev = "MEDIUM"
+            findings.append(
+                Finding(
+                    id=str(fd.get("id") or fd.get("finding_id") or ""),
+                    rule_id=str(fd.get("rule_id") or ""),
+                    title=str(fd.get("title") or fd.get("issue") or ""),
+                    severity=sev,  # type: ignore[arg-type]
+                    confidence=int(fd.get("confidence") or 0),
+                    source_file=str(fd.get("source_file") or fd.get("file_path") or ""),
+                    element_name=str(fd.get("element_name") or ""),
+                    element_type=str(fd.get("element_type") or ""),
+                    language=str(fd.get("language") or ""),
+                    line=int(fd.get("line") or fd.get("line_number") or 0),
+                    evidence=str(fd.get("evidence") or ""),
+                    technical_impact=str(fd.get("technical_impact") or ""),
+                    remediation=str(fd.get("remediation") or ""),
+                    action_required=str(fd.get("action_required") or ""),
+                    category=str(fd.get("category") or ""),
+                    engine=str(fd.get("engine") or "rules"),
+                    code_snippet_as_is=str(fd.get("code_snippet_as_is") or ""),
+                    code_snippet_to_be=str(fd.get("code_snippet_to_be") or ""),
+                    problem_breakdown=str(fd.get("problem_breakdown") or ""),
+                    remediation_guide=str(fd.get("remediation_guide") or ""),
+                    language_label=str(fd.get("language_label") or ""),
+                    is_false_positive=bool(fd.get("is_false_positive")),
+                    is_blind_spot=bool(fd.get("is_blind_spot")),
+                    ai_validation_status=str(fd.get("ai_validation_status") or ""),
+                )
+            )
+        except Exception:  # noqa: BLE001
+            continue
+
+    report = AuditReport(
+        source=str(cached_audit.get("source") or row.get("nsf_path") or graph_id),
+        files_scanned=int(cached_audit.get("files_scanned") or 0),
+        blocks_scanned=int(cached_audit.get("blocks_scanned") or 0),
+        blocks_prefiltered=int(cached_audit.get("blocks_prefiltered") or 0),
+        findings=findings,
+        llm_enabled=bool(cached_audit.get("llm_enabled")),
+        notes=list(cached_audit.get("notes") or []),
+    )
 
     try:
         payload = build_code_audit_checklist_docx(

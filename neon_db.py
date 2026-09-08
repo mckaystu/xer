@@ -456,7 +456,11 @@ def build_audit_snapshot(
     previous: dict[str, Any] | None = None,
     include_findings: bool | None = None,
 ) -> dict[str, Any]:
-    """Run audit + inventory and return a persisted snapshot (with optional history + findings)."""
+    """Run audit + inventory and return a persisted snapshot (with optional history + findings).
+
+    Schema v3 stores full ``code_audit`` and ``function_inventory`` payloads so the UI can
+    reload without re-analyzing on every browser open.
+    """
     from datetime import datetime, timezone
 
     from analytics.code_auditor.engine import run_audit
@@ -482,12 +486,11 @@ def build_audit_snapshot(
         by_prefix[prefix] = by_prefix.get(prefix, 0) + 1
     summary = inventory.get("summary") or {}
     now = datetime.now(timezone.utc).isoformat()
-    store_findings = bool(use_llm) if include_findings is None else include_findings
-    # Cap persisted findings to keep JSONB reasonable
-    findings_payload = []
-    if store_findings:
-        findings_payload = [f.to_dict() for f in findings[:200]]
+    # Always persist full findings for cache serving (v3). include_findings kept for callers.
+    store_findings = True if include_findings is None else bool(include_findings)
+    findings_payload = [f.to_dict() for f in findings] if store_findings else []
 
+    code_audit = report.to_dict()
     point = {
         "at": now,
         "handle_safety_rate": summary.get("handle_safety_rate"),
@@ -502,7 +505,7 @@ def build_audit_snapshot(
     history = history[-24:]
 
     return {
-        "schema_version": 2,
+        "schema_version": 3,
         "llm_enabled": bool(report.llm_enabled),
         "findings_total": len(findings),
         "findings_active": len(active),
@@ -519,11 +522,42 @@ def build_audit_snapshot(
             "functions_escape_path_gap": summary.get("functions_escape_path_gap"),
             "total_functions_scanned": summary.get("total_functions_scanned"),
         },
+        # Full payloads for fast UI reload (avoid re-running rules on every browser open)
+        "code_audit": code_audit,
+        "function_inventory": inventory,
         "notes": list(report.notes or [])[:8],
         "history": history,
         "findings": findings_payload,
         "captured_at": now,
     }
+
+
+def cached_code_audit_from_row(row: dict[str, Any]) -> dict[str, Any] | None:
+    """Return persisted code-audit payload when schema v3 cache is present."""
+    snap = row.get("audit_snapshot")
+    if not isinstance(snap, dict) or int(snap.get("schema_version") or 0) < 3:
+        return None
+    payload = snap.get("code_audit")
+    if not isinstance(payload, dict) or "findings" not in payload:
+        return None
+    out = dict(payload)
+    out["cached"] = True
+    out["cached_at"] = row.get("audit_snapshot_at") or snap.get("captured_at")
+    return out
+
+
+def cached_function_inventory_from_row(row: dict[str, Any]) -> dict[str, Any] | None:
+    """Return persisted function-inventory payload when schema v3 cache is present."""
+    snap = row.get("audit_snapshot")
+    if not isinstance(snap, dict) or int(snap.get("schema_version") or 0) < 3:
+        return None
+    payload = snap.get("function_inventory")
+    if not isinstance(payload, dict) or "summary" not in payload:
+        return None
+    out = dict(payload)
+    out["cached"] = True
+    out["cached_at"] = row.get("audit_snapshot_at") or snap.get("captured_at")
+    return out
 
 
 def ensure_audit_snapshot(
