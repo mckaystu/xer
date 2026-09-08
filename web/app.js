@@ -212,14 +212,22 @@ function computeNodeIssues() {
 
   const inventory = currentFunctionInventory?.inventory || [];
   inventory.forEach((row, idx) => {
-    if (row.status !== "UNPROTECTED_ALLOCATION") return;
+    if (
+      !["UNPROTECTED_ALLOCATION", "PARTIAL_CLEANUP", "CONDITIONAL_CLEANUP"].includes(
+        row.status
+      )
+    ) {
+      return;
+    }
     const nodeId = row.design_element;
     if (!nodeId) return;
     bump(nodeId, {
       kind: "inventory",
       idx,
       severity: row.risk_severity || row.severity || "LOW",
-      label: `${row.function_name || "function"} — unprotected allocation`,
+      label: `${row.function_name || "function"} — ${String(row.status || "")
+        .replace(/_/g, " ")
+        .toLowerCase()}`,
     });
   });
 
@@ -855,12 +863,16 @@ function renderRulesCatalog() {
 
 function inventoryStatusClass(status) {
   if (status === "UNPROTECTED_ALLOCATION") return "status-unprotected";
+  if (status === "PARTIAL_CLEANUP") return "status-partial";
+  if (status === "CONDITIONAL_CLEANUP") return "status-conditional";
   if (status === "PROTECTED") return "status-protected";
   return "status-safe";
 }
 
 function inventoryStatusLabel(status) {
   if (status === "UNPROTECTED_ALLOCATION") return "Unprotected";
+  if (status === "PARTIAL_CLEANUP") return "Partial cleanup";
+  if (status === "CONDITIONAL_CLEANUP") return "Conditional cleanup";
   if (status === "PROTECTED") return "Protected";
   return "Safe (no handles)";
 }
@@ -885,11 +897,14 @@ function renderFunctionInventoryCard(inventory) {
   const allocating = s.functions_allocating_handles || 0;
   const withCleanup = s.functions_with_cleanup || 0;
   const unprotected = s.unprotected_functions || 0;
+  const partial = s.functions_partial_cleanup || 0;
+  const conditional = s.functions_conditional_cleanup || 0;
+  const incomplete = (s.functions_incomplete_cleanup || partial + conditional);
   const safeNoHandles =
     typeof s.functions_safe_no_handles === "number"
       ? s.functions_safe_no_handles
       : Math.max(0, scanned - allocating);
-  // Primary ring: overall handle safety (safe + protected) / scanned
+  // Primary ring: overall handle safety (safe + fully protected) / scanned
   const safetyRate =
     typeof s.handle_safety_rate === "number"
       ? s.handle_safety_rate
@@ -935,11 +950,12 @@ function renderFunctionInventoryCard(inventory) {
       </p>
       <p class="coverage-sub">
         Of the <strong>${allocating}</strong> functions that actually allocate Domino handles,
-        <strong>${withCleanup}</strong> clean up (<strong>${recycleAmongAllocators}%</strong> recycle coverage)
+        <strong>${withCleanup}</strong> fully clean up (<strong>${recycleAmongAllocators}%</strong> recycle coverage),
+        <strong>${incomplete}</strong> have partial/conditional cleanup,
         and <strong>${unprotected}</strong> are unprotected.
         ${
-          unprotected > 0
-            ? ` Open an <strong>Unprotected</strong> row below to see the missing <code>Delete</code> / <code>.recycle()</code>.`
+          unprotected + incomplete > 0
+            ? ` Open an <strong>Unprotected</strong> / <strong>Partial</strong> row below to see missing <code>Delete</code> / <code>.recycle()</code>.`
             : ""
         }
       </p>
@@ -965,6 +981,7 @@ function renderFunctionInventoryCard(inventory) {
               <div class="metric"><span class="metric-label">Safe (no handles)</span><strong>${safeNoHandles}</strong></div>
               <div class="metric"><span class="metric-label">Allocate handles</span><strong>${allocating}</strong></div>
               <div class="metric"><span class="metric-label">With cleanup</span><strong>${withCleanup}</strong></div>
+              <div class="metric"><span class="metric-label">Partial / conditional</span><strong>${incomplete}</strong></div>
               <div class="metric"><span class="metric-label">Unprotected</span><strong>${unprotected}</strong></div>
               <div class="metric"><span class="metric-label">Recycle among allocators</span><strong>${recycleAmongAllocators}%</strong></div>
             </div>
@@ -1101,6 +1118,12 @@ function findingCategoryBucket(f) {
   if (rid.startsWith("PERF-") || cat.includes("Performance") || cat.includes("NIF")) {
     return "performance";
   }
+  if (rid.startsWith("FORM-") || cat.includes("Formula")) {
+    return "formula";
+  }
+  if (rid.startsWith("DOM-OWN") || cat.includes("Handle Ownership")) {
+    return "ownership";
+  }
   if (rid.startsWith("DOM-BS") || f.is_blind_spot || cat.includes("AI Discrepancy")) {
     return "ai";
   }
@@ -1120,6 +1143,8 @@ function filterAuditFindings(findings, filter) {
       if (filter === "blind_spot") return bucket === "blind_spot";
       if (filter === "handle") return cat === "handle" && !f.is_false_positive;
       if (filter === "performance") return cat === "performance" && !f.is_false_positive;
+      if (filter === "formula") return cat === "formula" && !f.is_false_positive;
+      if (filter === "ownership") return cat === "ownership" && !f.is_false_positive;
       if (filter === "ai_discovered") return cat === "ai" || bucket === "blind_spot";
       return true;
     });
@@ -1203,6 +1228,8 @@ function renderCodeAuditCard(audit) {
       : findings.filter((f) => findingFilterBucket(f) === "blind_spot").length;
   const handleCount = findings.filter((f) => findingCategoryBucket(f) === "handle" && !f.is_false_positive).length;
   const perfCount = findings.filter((f) => findingCategoryBucket(f) === "performance" && !f.is_false_positive).length;
+  const formulaCount = findings.filter((f) => findingCategoryBucket(f) === "formula" && !f.is_false_positive).length;
+  const ownershipCount = findings.filter((f) => findingCategoryBucket(f) === "ownership" && !f.is_false_positive).length;
   const aiCatCount = findings.filter(
     (f) => findingCategoryBucket(f) === "ai" || findingFilterBucket(f) === "blind_spot"
   ).length;
@@ -1221,7 +1248,9 @@ function renderCodeAuditCard(audit) {
           <div class="findings-filter-bar" role="toolbar" aria-label="Category filters">
             ${filterBtn("all", "All Findings", findings.length)}
             ${filterBtn("handle", "Handle Leaks", handleCount)}
+            ${filterBtn("ownership", "Ownership", ownershipCount)}
             ${filterBtn("performance", "Performance & NIF", perfCount)}
+            ${filterBtn("formula", "Formula", formulaCount)}
             ${filterBtn("ai_discovered", "AI Discovered", aiCatCount)}
           </div>
           <div class="findings-filter-bar" role="toolbar" aria-label="AI validation filters">

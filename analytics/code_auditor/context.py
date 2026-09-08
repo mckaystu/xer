@@ -39,6 +39,7 @@ LOOP_SENSITIVE_HANDLE_RULES = frozenset(
         "LS-DOM-008",
         "DOM-BS-001",
         "DOM-BS-002",
+        "DOM-OWN-001",
     }
 )
 
@@ -97,6 +98,10 @@ def inventory_risk_severity(*, status: str, in_loop: bool) -> Severity:
         return "LOW"
     if status == "SAFE_NO_HANDLES":
         return "LOW"
+    if status == "CONDITIONAL_CLEANUP":
+        return "HIGH" if in_loop else "MEDIUM"
+    if status == "PARTIAL_CLEANUP":
+        return "CRITICAL" if in_loop else "MEDIUM"
     # UNPROTECTED_ALLOCATION
     if in_loop:
         return "CRITICAL"

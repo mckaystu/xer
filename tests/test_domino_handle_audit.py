@@ -256,9 +256,10 @@ End Sub
         assert "DOM-006" in rules(unit)
 
     def test_conditional_delete_still_counts_cleanup_today(self):
-        """Documented heuristic: any Delete in the loop body clears LS-DOM-001.
+        """Conditional Delete is incomplete — inventory marks CONDITIONAL_CLEANUP.
 
-        Incomplete/conditional Delete is a known blind spot (prefer AI Pass 2).
+        LS-DOM-001 still stays quiet when any Delete appears in the loop body
+        (rule-level blind spot); inventory is now honest about conditionality.
         """
         unit = ls(
             "CondDelete",
@@ -278,7 +279,7 @@ End Sub
 """,
         )
         assert "LS-DOM-001" not in rules(unit)
-        assert inventory_status(unit, "Initialize") == "PROTECTED"
+        assert inventory_status(unit, "Initialize") == "CONDITIONAL_CLEANUP"
 
 
 # ---------------------------------------------------------------------------

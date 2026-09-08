@@ -170,10 +170,12 @@ def load_graph_from_file(path: Path | str) -> dict[str, Any]:
 def list_graphs(limit: int = 50) -> list[dict[str, Any]]:
     conn = connect()
     try:
+        init_schema(conn)
         with conn.cursor(cursor_factory=RealDictCursor) as cur:
             cur.execute(
                 """
-                SELECT id, nsf_path, database_title, parser_version, parsed_at, totals
+                SELECT id, nsf_path, database_title, parser_version, parsed_at, totals,
+                       audit_snapshot, audit_snapshot_at
                 FROM dxl_graphs
                 ORDER BY parsed_at DESC
                 LIMIT %s
@@ -181,14 +183,30 @@ def list_graphs(limit: int = 50) -> list[dict[str, Any]]:
                 (limit,),
             )
             rows = cur.fetchall()
-        return [
-            {
-                **row,
-                "id": str(row["id"]),
-                "parsed_at": row["parsed_at"].isoformat() if row["parsed_at"] else None,
-            }
-            for row in rows
-        ]
+        out: list[dict[str, Any]] = []
+        for row in rows:
+            snap = row.get("audit_snapshot")
+            out.append(
+                {
+                    "id": str(row["id"]),
+                    "nsf_path": row["nsf_path"],
+                    "database_title": row["database_title"],
+                    "parser_version": row["parser_version"],
+                    "parsed_at": row["parsed_at"].isoformat() if row["parsed_at"] else None,
+                    "totals": row["totals"],
+                    "audit_snapshot": snap,
+                    "audit_snapshot_at": row["audit_snapshot_at"].isoformat()
+                    if row.get("audit_snapshot_at")
+                    else None,
+                    "handle_safety_rate": (snap or {}).get("inventory", {}).get("handle_safety_rate")
+                    if isinstance(snap, dict)
+                    else None,
+                    "critical_findings": (snap or {}).get("critical_active")
+                    if isinstance(snap, dict)
+                    else None,
+                }
+            )
+        return out
     finally:
         conn.close()
 
@@ -201,7 +219,7 @@ def get_graph(graph_id: str) -> dict[str, Any] | None:
             cur.execute(
                 """
                 SELECT id, nsf_path, database_title, parser_version, parsed_at, totals, graph,
-                       business_rules, modernization_score
+                       business_rules, modernization_score, audit_snapshot, audit_snapshot_at
                 FROM dxl_graphs
                 WHERE id = %s
                 """,
@@ -220,6 +238,10 @@ def get_graph(graph_id: str) -> dict[str, Any] | None:
             "graph": row["graph"],
             "business_rules": row.get("business_rules"),
             "modernization_score": row.get("modernization_score"),
+            "audit_snapshot": row.get("audit_snapshot"),
+            "audit_snapshot_at": row["audit_snapshot_at"].isoformat()
+            if row.get("audit_snapshot_at")
+            else None,
         }
     finally:
         conn.close()
@@ -424,4 +446,96 @@ def build_viz_payload(graph: dict[str, Any]) -> dict[str, Any]:
         "edges": edge_list,
         "meta": graph.get("meta", {}),
         "multiDatabase": multi_db,
+    }
+
+
+def build_audit_snapshot(graph: dict[str, Any], *, use_llm: bool = False) -> dict[str, Any]:
+    """Run rules-only audit + inventory and return a compact persisted snapshot."""
+    from analytics.code_auditor.engine import run_audit
+    from analytics.code_auditor.function_inventory import run_function_inventory
+
+    report = run_audit(graph=graph, use_llm=use_llm)
+    inventory = run_function_inventory(graph=graph)
+    findings = report.findings
+    active = [f for f in findings if not f.is_false_positive]
+    by_sev: dict[str, int] = {"CRITICAL": 0, "HIGH": 0, "MEDIUM": 0, "LOW": 0}
+    by_prefix: dict[str, int] = {}
+    for f in active:
+        by_sev[f.severity] = by_sev.get(f.severity, 0) + 1
+        prefix = (f.rule_id or "OTHER").split("-")[0]
+        if f.rule_id.startswith("LS-DOM"):
+            prefix = "LS-DOM"
+        elif f.rule_id.startswith("DOM-OWN"):
+            prefix = "DOM-OWN"
+        elif f.rule_id.startswith("DOM-BS"):
+            prefix = "DOM-BS"
+        elif f.rule_id.startswith("FORM"):
+            prefix = "FORM"
+        by_prefix[prefix] = by_prefix.get(prefix, 0) + 1
+    summary = inventory.get("summary") or {}
+    return {
+        "schema_version": 1,
+        "llm_enabled": bool(report.llm_enabled),
+        "findings_total": len(findings),
+        "findings_active": len(active),
+        "by_severity": by_sev,
+        "by_family": by_prefix,
+        "critical_active": by_sev.get("CRITICAL", 0),
+        "high_active": by_sev.get("HIGH", 0),
+        "inventory": {
+            "handle_safety_rate": summary.get("handle_safety_rate"),
+            "recycle_coverage_rate": summary.get("recycle_coverage_rate"),
+            "unprotected_functions": summary.get("unprotected_functions"),
+            "functions_partial_cleanup": summary.get("functions_partial_cleanup"),
+            "functions_conditional_cleanup": summary.get("functions_conditional_cleanup"),
+            "total_functions_scanned": summary.get("total_functions_scanned"),
+        },
+        "notes": list(report.notes or [])[:8],
+    }
+
+
+def ensure_audit_snapshot(
+    graph_id: str,
+    *,
+    force: bool = False,
+    use_llm: bool = False,
+) -> dict[str, Any] | None:
+    """Compute and persist audit_snapshot on the graph row when missing or forced."""
+    row = get_graph(graph_id)
+    if not row:
+        return None
+    existing = row.get("audit_snapshot")
+    if existing and not force:
+        return {
+            "id": row["id"],
+            "audit_snapshot": existing,
+            "audit_snapshot_at": row.get("audit_snapshot_at"),
+            "cached": True,
+        }
+    snapshot = build_audit_snapshot(row["graph"], use_llm=use_llm)
+    conn = connect()
+    try:
+        init_schema(conn)
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                UPDATE dxl_graphs
+                SET audit_snapshot = %s, audit_snapshot_at = now()
+                WHERE id = %s
+                RETURNING audit_snapshot_at
+                """,
+                (Json(snapshot), UUID(graph_id)),
+            )
+            ts = cur.fetchone()[0]
+        conn.commit()
+    except psycopg2.Error as exc:
+        conn.rollback()
+        raise RuntimeError(f"Failed to persist audit snapshot: {exc}") from exc
+    finally:
+        conn.close()
+    return {
+        "id": graph_id,
+        "audit_snapshot": snapshot,
+        "audit_snapshot_at": ts.isoformat() if ts else None,
+        "cached": False,
     }

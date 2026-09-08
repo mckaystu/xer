@@ -169,6 +169,26 @@ RULE_CATALOG: dict[str, dict[str, str]] = {
         "category": "Application Security",
         "default_severity": "HIGH",
     },
+    "DOM-OWN-001": {
+        "title": "Unassigned Cross-Function Handle Ownership",
+        "category": "Handle Ownership",
+        "default_severity": "HIGH",
+    },
+    "FORM-001": {
+        "title": "Repeated @DbLookup/@DbColumn in Formula",
+        "category": "Formula Quality",
+        "default_severity": "MEDIUM",
+    },
+    "FORM-002": {
+        "title": "In-Loop @DbLookup/@DbColumn in Formula",
+        "category": "Formula Quality",
+        "default_severity": "HIGH",
+    },
+    "FORM-003": {
+        "title": "Hardcoded Secret or Plaintext HTTP in Formula",
+        "category": "Formula Quality",
+        "default_severity": "HIGH",
+    },
 }
 
 

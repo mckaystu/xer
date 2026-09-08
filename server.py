@@ -162,6 +162,16 @@ def api_graph_code_audit(
         )
     except Exception as exc:  # noqa: BLE001
         raise HTTPException(status_code=422, detail=f"Code audit failed: {exc}") from exc
+
+    # Persist compact snapshot for trends / CI (rules-only; don't block on LLM runs)
+    if not llm:
+        try:
+            from neon_db import ensure_audit_snapshot
+
+            ensure_audit_snapshot(graph_id, force=True, use_llm=False)
+        except Exception:  # noqa: BLE001
+            pass
+
     return report.to_dict()
 
 
@@ -185,6 +195,23 @@ def api_graph_function_inventory(graph_id: str) -> dict[str, Any]:
         )
     except Exception as exc:  # noqa: BLE001
         raise HTTPException(status_code=422, detail=f"Function inventory failed: {exc}") from exc
+
+
+@app.get("/api/graphs/{graph_id}/audit-snapshot")
+def api_graph_audit_snapshot(
+    graph_id: str,
+    refresh: bool = Query(False, description="Force recompute and persist snapshot"),
+) -> dict[str, Any]:
+    """Persisted handle-safety / finding trend snapshot for a graph."""
+    from neon_db import ensure_audit_snapshot
+
+    try:
+        payload = ensure_audit_snapshot(graph_id, force=refresh)
+    except (ValueError, ConnectionError, RuntimeError) as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    if not payload:
+        raise HTTPException(status_code=404, detail="Graph not found")
+    return payload
 
 
 @app.post("/api/synthesize")
@@ -251,6 +278,13 @@ async def api_upload_dxl(file: UploadFile = File(...)) -> dict[str, Any]:
     from neon_db import ensure_analysis
 
     analysis = ensure_analysis(graph_id) or {}
+    audit_snap: dict[str, Any] = {}
+    try:
+        from neon_db import ensure_audit_snapshot
+
+        audit_snap = ensure_audit_snapshot(graph_id, force=True) or {}
+    except Exception:  # noqa: BLE001
+        audit_snap = {}
     return {
         "id": graph_id,
         "filename": filename,
@@ -262,6 +296,10 @@ async def api_upload_dxl(file: UploadFile = File(...)) -> dict[str, Any]:
         "rules_catalog_fields": (analysis.get("business_rules") or {}).get("totals", {}).get("fields"),
         "modernization_score": (analysis.get("modernization_score") or {}).get("score"),
         "risk_rating": (analysis.get("modernization_score") or {}).get("risk_rating"),
+        "audit_snapshot": (audit_snap or {}).get("audit_snapshot"),
+        "handle_safety_rate": ((audit_snap or {}).get("audit_snapshot") or {})
+        .get("inventory", {})
+        .get("handle_safety_rate"),
     }
 
 

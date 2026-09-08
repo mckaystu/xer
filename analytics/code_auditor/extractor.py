@@ -10,7 +10,8 @@ from typing import Iterable
 from analytics.code_auditor.models import CodeUnit
 
 CODE_TAGS = {"java", "lotusscript", "javascript", "jscript", "ssjs", "formula", "source", "script"}
-INTERESTING_LANGS = {"java", "lotusscript", "javascript", "jscript", "ssjs", "source", "script"}
+# Formula is interesting for FORM-* quality rules (not C-API recycle inventory).
+INTERESTING_LANGS = {"java", "lotusscript", "javascript", "jscript", "ssjs", "source", "script", "formula"}
 
 PREFILTER_KEYWORDS: list[tuple[str, re.Pattern[str]]] = [
     ("session", re.compile(r"\bsession\b", re.I)),
@@ -26,6 +27,8 @@ PREFILTER_KEYWORDS: list[tuple[str, re.Pattern[str]]] = [
     ("sessionScope", re.compile(r"sessionScope|applicationScope|viewScope", re.I)),
     ("getColumnValues", re.compile(r"getColumnValues?|getColumnValue", re.I)),
     ("Factory", re.compile(r"Factory\.fromLotus", re.I)),
+    ("DbLookup", re.compile(r"@Db(?:Lookup|Column)\b", re.I)),
+    ("formula_loop", re.compile(r"@(?:While|For)\b", re.I)),
 ]
 
 
@@ -148,10 +151,8 @@ def extract_units_from_dxl_bytes(content: bytes | str, source_file: str) -> list
                 language = "java"
 
         if language == "formula":
-            # Formula rarely owns C-API handles; skip unless recycle/ODA keywords appear
-            kws = prefilter_keywords(body)
-            if not any(k in kws for k in ("recycle", "openntf", "lotus.domino", "createDateTime")):
-                continue
+            # Always extract formula for FORM-* quality track (not handle recycle).
+            pass
 
         element_type, element_name = _nearest_named_ancestor(elem, parent_map)
         # Approximate start line from absolute offset in source text
@@ -227,8 +228,6 @@ def extract_units_from_graph(graph: dict) -> list[CodeUnit]:
     units: list[CodeUnit] = []
     for block in graph.get("business_logic") or []:
         lang = (block.get("language") or "unknown").lower()
-        if lang == "formula":
-            continue
         body = block.get("body") or ""
         if not body.strip():
             continue

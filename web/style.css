@@ -926,6 +926,14 @@ th { color: var(--muted); font-weight: 500; }
   background: rgba(192, 96, 96, 0.22);
   color: #f0a0a0;
 }
+.status-pill.status-partial {
+  background: rgba(192, 140, 64, 0.22);
+  color: #f0c080;
+}
+.status-pill.status-conditional {
+  background: rgba(192, 170, 64, 0.2);
+  color: #e0c860;
+}
 .status-pill.status-protected {
   background: rgba(106, 191, 105, 0.18);
   color: #8ee08c;

@@ -114,15 +114,51 @@ Catalog lives in `analytics/code_auditor/models.py`. Detectors: `rules.py`, `ls_
 | Status | Meaning |
 |--------|---------|
 | `SAFE_NO_HANDLES` | No Domino allocation signals |
-| `PROTECTED` | Allocates + has `Delete` / `.recycle()` |
+| `PROTECTED` | Allocates + every named handle cleaned (or unconditional cleanup) |
+| `PARTIAL_CLEANUP` | Some allocated vars cleaned; others missing `Delete` / `.recycle()` |
+| `CONDITIONAL_CLEANUP` | Cleanup only under `If` (no `finally` / unconditional release) |
 | `UNPROTECTED_ALLOCATION` | Allocates with no explicit cleanup |
 
 **Metrics**
 
-- **Handle safety rate** (primary UI ring): `(safe + protected) / scanned`
-- **Recycle coverage** (secondary): `with_cleanup / allocators`
+- **Handle safety rate** (primary UI ring): `(safe + fully protected) / scanned` — partial/conditional do **not** inflate the rate
+- **Recycle coverage** (secondary): `fully_protected / allocators`
+
+Shared API catalog: `analytics/code_auditor/api_catalog.py` (Notes* types + alloc methods).
 
 Inventory deep-dives are also loop-aware: non-loop unprotected helpers show **LOW** severity and linear cleanup templates (not CRITICAL exhaustion messaging).
+
+---
+
+## Deterministic ownership (`DOM-OWN-001`)
+
+Static call-graph ownership lives in `ownership_rules.py`. It flags handle returns/parameters where neither caller nor callee cleans up. LLM Pass 3 (`DOM-BS-002`) still runs for residual gaps and severity escalation, and **skips elements already covered by `DOM-OWN-001`**.
+
+---
+
+## Formula quality (`FORM-001` … `FORM-003`)
+
+Formula units are extracted from DXL/graph for a **separate** quality track (not C-API recycle):
+
+| ID | Focus |
+|----|--------|
+| FORM-001 | Repeated `@DbLookup` / `@DbColumn` |
+| FORM-002 | Lookups inside `@While` / `@For` |
+| FORM-003 | Hardcoded secrets / plaintext `http://` |
+
+---
+
+## Continuous assurance
+
+| Surface | Path |
+|---------|------|
+| Persisted snapshot | `dxl_graphs.audit_snapshot` (+ `audit_snapshot_at`) |
+| API | `GET /api/graphs/{id}/audit-snapshot` |
+| Upload | Recomputes snapshot after DXL store |
+| Code-audit GET | Refreshes snapshot (rules-only) |
+| CI gate | `python3 scripts/ci_audit.py <path>` + `.github/workflows/xer-auditor.yml` |
+
+Snapshot includes finding counts by severity/family and inventory rates for trend charts.
 
 ---
 
@@ -134,7 +170,7 @@ Requires `OPENAI_API_KEY` (optional `XER_AUDIT_MODEL`). Implemented in `llm_engi
 |------|------|
 | **Pass 1** | False-positive filter; **`VERIFIED_NON_LOOP`** demotes one-shot helpers to LOW + hygiene note |
 | **Pass 2** | Blind spots on handle-allocating units with zero static hits → `DOM-BS-001` |
-| **Pass 3** | Cross-module ownership + severity escalation on background/hot paths → `DOM-BS-002` |
+| **Pass 3** | Cross-module ownership + severity escalation on background/hot paths → `DOM-BS-002` (deduped vs `DOM-OWN-001`) |
 
 ---
 
@@ -217,6 +253,9 @@ xer/
 ├── domino_dxl_auditor.py
 ├── upgrade_scan.py
 ├── analytics/code_auditor/
+│   ├── api_catalog.py      # Shared Notes*/alloc API catalog
+│   ├── ownership_rules.py  # DOM-OWN-001 static ownership
+│   ├── form_rules.py       # FORM-001..003 formula quality
 │   ├── context.py          # loop-aware severity
 │   ├── extractor.py
 │   ├── rules.py            # DOM-*
@@ -229,6 +268,7 @@ xer/
 │   ├── models.py           # RULE_CATALOG, Finding, AuditReport
 │   ├── engine.py / report.py
 │   └── …
+├── scripts/ci_audit.py     # CI gate (critical / unprotected budgets)
 ├── web/app.js              # Code Analysis UI
 ├── tests/audit/
 └── docs/Xer_Code_Analysis_Rubric.docx

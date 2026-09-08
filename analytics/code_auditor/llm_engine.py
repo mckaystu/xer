@@ -468,6 +468,12 @@ def _pass3_cross_module_ownership(
 
     meta = RULE_CATALOG["DOM-BS-002"]
     unit_by_name = {u.element_name: u for u in selected}
+    # Skip AI ownership gaps when static DOM-OWN-001 already covers the element
+    static_own_elements = {
+        (f.element_name or "").lower()
+        for f in findings
+        if f.rule_id == "DOM-OWN-001" and not f.is_false_positive
+    }
     new_findings: list[Finding] = []
     for raw in result.get("ownership_gaps") or []:
         try:
@@ -486,6 +492,8 @@ def _pass3_cross_module_ownership(
             severity = "CRITICAL" if severity == "HIGH" else "HIGH"
 
         element_name = str(raw.get("element_name") or selected[0].element_name)
+        if element_name.lower() in static_own_elements:
+            continue
         unit = unit_by_name.get(element_name) or next(
             (u for u in selected if element_name.lower() in (u.element_name or "").lower()),
             selected[0],

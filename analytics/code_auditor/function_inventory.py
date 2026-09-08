@@ -11,6 +11,13 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any, Iterable, Literal
 
+from analytics.code_auditor.api_catalog import (
+    ALLOCATION_PATTERNS,
+    LS_ALLOCATION_PATTERNS,
+    analyze_handle_cleanup,
+    body_allocates,
+    count_cleanup_statements,
+)
 from analytics.code_auditor.context import (
     NON_LOOP_HYGIENE_NOTE,
     body_has_loop,
@@ -27,54 +34,12 @@ from analytics.code_auditor.snippets import (
     language_label,
     remediation_template,
 )
-FunctionStatus = Literal["SAFE_NO_HANDLES", "PROTECTED", "UNPROTECTED_ALLOCATION"]
-
-# Domino handle allocation heuristics (Java / SSJS — word matches)
-ALLOCATION_PATTERNS: list[re.Pattern[str]] = [
-    re.compile(r"\bNotesDocument\b", re.I),
-    re.compile(r"\bNotesView\b", re.I),
-    re.compile(r"\bNotesDatabase\b", re.I),
-    re.compile(r"\bNotesViewEntry\b", re.I),
-    re.compile(r"\bNotesViewNavigator\b", re.I),
-    re.compile(r"\bNotesViewNav\b", re.I),
-    re.compile(r"\bNotesDateTime\b", re.I),
-    re.compile(r"\bDocument\b"),
-    re.compile(r"\bView\b"),
-    re.compile(r"\bDatabase\b"),
-    re.compile(r"\bcreateDateTime\b", re.I),
-    re.compile(r"\bcreateViewNav\b", re.I),
-    re.compile(r"\bGetDocumentByUNID\b", re.I),
-    re.compile(r"\bGetFirstDocument\b", re.I),
-    re.compile(r"\bGetNextDocument\b", re.I),
-    re.compile(r"\bGetNthDocument\b", re.I),
-    re.compile(r"\bGetNthEntry\b", re.I),
-    re.compile(r"\bGetEntryByKey\b", re.I),
-    re.compile(r"\bgetDocumentByUNID\b"),
-    re.compile(r"\bgetFirstDocument\b"),
-    re.compile(r"\bgetNextDocument\b"),
-    re.compile(r"\bgetNthDocument\b", re.I),
-    re.compile(r"\bgetNthEntry\b", re.I),
-    re.compile(r"\bgetEntryByKey\b"),
-    re.compile(r"\bgetAllDocumentsByKey\b", re.I),
-    re.compile(r"\bgetView\b", re.I),
-    re.compile(r"\bgetDatabase\b", re.I),
-]
-
-# LotusScript-specific allocation (Delete / Notes* semantics — no bare Document/View)
-LS_ALLOCATION_PATTERNS: list[re.Pattern[str]] = [
-    re.compile(r"\bNotesDocument\b", re.I),
-    re.compile(r"\bNotesView\b", re.I),
-    re.compile(r"\bNotesDatabase\b", re.I),
-    re.compile(r"\bNotesViewEntry\b", re.I),
-    re.compile(r"\bNotesViewNav(?:igator)?\b", re.I),
-    re.compile(r"\bGetDocumentByUNID\b", re.I),
-    re.compile(r"\bGetFirstDocument\b", re.I),
-    re.compile(r"\bGetNextDocument\b", re.I),
-    re.compile(r"\bGetNthDocument\b", re.I),
-    re.compile(r"\bGetNthEntry\b", re.I),
-    re.compile(r"\bGetEntryByKey\b", re.I),
-    re.compile(r"\bGetNextEntry\b", re.I),
-    re.compile(r"\bCreateDocument\b", re.I),
+FunctionStatus = Literal[
+    "SAFE_NO_HANDLES",
+    "PROTECTED",
+    "PARTIAL_CLEANUP",
+    "CONDITIONAL_CLEANUP",
+    "UNPROTECTED_ALLOCATION",
 ]
 
 # LotusScript: Sub / Function (skip Declare …)
@@ -131,6 +96,10 @@ class FunctionRecord:
     language_label: str = ""
     in_loop: bool = False
     risk_severity: str = "MEDIUM"
+    allocated_vars: list[str] = field(default_factory=list)
+    cleaned_vars: list[str] = field(default_factory=list)
+    unclean_vars: list[str] = field(default_factory=list)
+    cleanup_conditional: bool = False
 
     def to_dict(self) -> dict[str, Any]:
         data = asdict(self)
@@ -165,39 +134,15 @@ def _is_lotusscript_lang(lang: str) -> bool:
 
 
 def _count_allocates(body: str, language: str = "") -> bool:
-    patterns = LS_ALLOCATION_PATTERNS if _is_lotusscript_lang(language) else ALLOCATION_PATTERNS
-    return any(p.search(body) for p in patterns)
+    return body_allocates(body, language)
 
 
 def _count_cleanup(body: str, language: str = "") -> int:
-    """Count explicit cleanup statements without double-counting Call x.recycle()."""
-    if _is_lotusscript_lang(language):
-        # LotusScript: Delete <var> and Call <var>.Recycle() / <var>.Recycle()
-        patterns = [
-            re.compile(r"\bCall\s+\w+\.Recycle\s*\([^)]*\)", re.I),
-            re.compile(r"\b\w+\.Recycle\s*\([^)]*\)", re.I),
-            re.compile(r"\bDelete\s+\w+", re.I),
-        ]
-    else:
-        patterns = [
-            re.compile(r"\bCall\s+\w+\.recycle\s*\([^)]*\)", re.I),
-            re.compile(r"\.recycle\s*\([^)]*\)", re.I),
-            re.compile(r"\bDelete\s+\w+", re.I),
-            re.compile(r"\brecycleLotuses\s*\([^)]*\)", re.I),
-        ]
-    occupied: list[tuple[int, int]] = []
-    total = 0
-    for pattern in patterns:
-        for m in pattern.finditer(body):
-            start, end = m.start(), m.end()
-            if any(not (end <= a or start >= b) for a, b in occupied):
-                continue
-            occupied.append((start, end))
-            total += 1
-    return total
+    return count_cleanup_statements(body, language)
 
 
 def _classify(allocates: bool, recycle_count: int) -> FunctionStatus:
+    """Legacy binary classify — prefer analyze_handle_cleanup for path-aware status."""
     if not allocates:
         return "SAFE_NO_HANDLES"
     if recycle_count >= 1:
@@ -336,7 +281,7 @@ def extract_functions_from_unit(unit: CodeUnit) -> list[tuple[str, str, int, str
 
 def _focus_offset(analysis_body: str, status: FunctionStatus, language: str) -> int:
     """Byte offset inside analysis_body to highlight."""
-    if status == "PROTECTED":
+    if status in {"PROTECTED", "PARTIAL_CLEANUP", "CONDITIONAL_CLEANUP"}:
         patterns = [
             re.compile(r"\bDelete\s+\w+", re.I),
             re.compile(r"\b(?:Call\s+)?\w+\.Recycle\s*\(", re.I),
@@ -346,7 +291,13 @@ def _focus_offset(analysis_body: str, status: FunctionStatus, language: str) -> 
             m = p.search(analysis_body)
             if m:
                 return m.start()
-    if status in {"UNPROTECTED_ALLOCATION", "PROTECTED", "SAFE_NO_HANDLES"}:
+    if status in {
+        "UNPROTECTED_ALLOCATION",
+        "PARTIAL_CLEANUP",
+        "CONDITIONAL_CLEANUP",
+        "PROTECTED",
+        "SAFE_NO_HANDLES",
+    }:
         patterns = LS_ALLOCATION_PATTERNS if _is_lotusscript_lang(language) else ALLOCATION_PATTERNS
         for p in patterns:
             m = p.search(analysis_body)
@@ -356,10 +307,12 @@ def _focus_offset(analysis_body: str, status: FunctionStatus, language: str) -> 
 
 
 def _inventory_guides(
-    status: FunctionStatus, language: str, function_name: str, *, in_loop: bool
+    status: FunctionStatus, language: str, function_name: str, *, in_loop: bool,
+    unclean_vars: list[str] | None = None,
 ) -> tuple[str, str, str, str]:
     """problem, guide, warning, to_be_template."""
     is_ls = _is_lotusscript_lang(language) or language == "LotusScript"
+    unclean = unclean_vars or []
     if status == "UNPROTECTED_ALLOCATION":
         if in_loop:
             problem = (
@@ -399,6 +352,36 @@ def _inventory_guides(
                 "lotusscript" if is_ls else "java",
                 has_loop=False,
             )
+    elif status == "PARTIAL_CLEANUP":
+        missing = ", ".join(f"`{v}`" for v in unclean) if unclean else "one or more allocated handles"
+        problem = (
+            f"`{function_name}` cleans up some Domino handles but leaves {missing} without "
+            f"{'`Delete`' if is_ls else '`.recycle()`'}."
+        )
+        guide = (
+            "Pair every allocated Notes*/Document variable with a matching cleanup on all exit paths."
+        )
+        warning = "Partial cleanup — presence of Delete/recycle is not enough when names don't match."
+        to_be = remediation_template(
+            "LS-DOM-004" if is_ls else "DOM-010",
+            "lotusscript" if is_ls else "java",
+            has_loop=in_loop,
+        )
+    elif status == "CONDITIONAL_CLEANUP":
+        problem = (
+            f"`{function_name}` only releases handles inside conditional branches "
+            f"(no unconditional {'`Delete`' if is_ls else '`.recycle()`'} / `finally`)."
+        )
+        guide = (
+            "Move cleanup into a `finally` (Java/SSJS) or after the business If (LotusScript) "
+            "so every path releases the handle."
+        )
+        warning = "Conditional cleanup — skip/fail paths can leak C-API handles."
+        to_be = remediation_template(
+            "DOM-012" if not is_ls else "LS-DOM-007",
+            "lotusscript" if is_ls else "java",
+            has_loop=in_loop,
+        )
     elif status == "PROTECTED":
         problem = (
             f"`{function_name}` allocates Domino handles and contains explicit cleanup "
@@ -439,6 +422,7 @@ def _attach_inventory_snippets(
     language: str,
     function_name: str,
     in_loop: bool,
+    unclean_vars: list[str] | None = None,
 ) -> dict[str, Any]:
     # Map analysis offset → absolute line in display_body
     # Prefer highlighting inside display text by searching the same token
@@ -460,7 +444,7 @@ def _attach_inventory_snippets(
         radius=radius,
     )
     problem, guide, warning, to_be = _inventory_guides(
-        status, language, function_name, in_loop=in_loop
+        status, language, function_name, in_loop=in_loop, unclean_vars=unclean_vars
     )
     return {
         "code_snippet_as_is": snippet,
@@ -482,9 +466,8 @@ def build_inventory(units: Iterable[CodeUnit]) -> list[FunctionRecord]:
     for unit in units:
         for name, fn_body, start_line, display_body in extract_functions_from_unit(unit):
             seq += 1
-            allocates = _count_allocates(fn_body, unit.language)
-            recycle_count = _count_cleanup(fn_body, unit.language)
-            status = _classify(allocates, recycle_count)
+            analysis = analyze_handle_cleanup(fn_body, unit.language)
+            status = analysis.status  # type: ignore[assignment]
             lang_label = _language_label(unit.language)
             looped = body_has_loop(fn_body)
             risk = inventory_risk_severity(status=status, in_loop=looped)
@@ -496,6 +479,7 @@ def build_inventory(units: Iterable[CodeUnit]) -> list[FunctionRecord]:
                 language=unit.language,
                 function_name=name,
                 in_loop=looped,
+                unclean_vars=analysis.unclean_vars,
             )
             records.append(
                 FunctionRecord(
@@ -503,14 +487,18 @@ def build_inventory(units: Iterable[CodeUnit]) -> list[FunctionRecord]:
                     design_element=_design_element(unit),
                     function_name=name,
                     language=lang_label,
-                    allocates_handles=allocates,
-                    recycle_call_count=recycle_count,
+                    allocates_handles=analysis.allocates,
+                    recycle_call_count=analysis.recycle_call_count,
                     status=status,
                     loc=_loc(fn_body),
                     source_file=unit.source_file,
                     start_line=start_line,
                     in_loop=looped,
                     risk_severity=risk,
+                    allocated_vars=analysis.allocated_vars,
+                    cleaned_vars=analysis.cleaned_vars,
+                    unclean_vars=analysis.unclean_vars,
+                    cleanup_conditional=analysis.cleanup_conditional,
                     **snippets,
                 )
             )
@@ -520,28 +508,36 @@ def build_inventory(units: Iterable[CodeUnit]) -> list[FunctionRecord]:
 def summarize_inventory(records: list[FunctionRecord]) -> dict[str, Any]:
     total = len(records)
     allocating = [r for r in records if r.allocates_handles]
-    with_cleanup = [r for r in allocating if r.recycle_call_count >= 1]
-    unprotected = [r for r in allocating if r.recycle_call_count == 0]
+    fully_protected = [r for r in allocating if r.status == "PROTECTED"]
+    partial = [r for r in allocating if r.status == "PARTIAL_CLEANUP"]
+    conditional = [r for r in allocating if r.status == "CONDITIONAL_CLEANUP"]
+    unprotected = [r for r in allocating if r.status == "UNPROTECTED_ALLOCATION"]
+    # Legacy "with cleanup" = any presence of cleanup (not fully unprotected)
+    with_cleanup = [r for r in allocating if r.status != "UNPROTECTED_ALLOCATION"]
     safe = [r for r in records if not r.allocates_handles]
-    # Among allocators only: share that clean up
+    # Among allocators: only fully protected count toward recycle coverage honesty
     recycle_among_allocators = (
-        round((len(with_cleanup) / len(allocating)) * 100.0, 1) if allocating else 100.0
+        round((len(fully_protected) / len(allocating)) * 100.0, 1) if allocating else 100.0
     )
-    # Overall: share of all functions that are not an unprotected leak risk
-    # (safe-no-handles + protected) / total — matches "31 of 40 are fine" intuition
+    # Overall: only SAFE + fully PROTECTED count as "safe" for the ring
     handle_safety_rate = (
-        round(((len(safe) + len(with_cleanup)) / total) * 100.0, 1) if total else 100.0
+        round(((len(safe) + len(fully_protected)) / total) * 100.0, 1) if total else 100.0
     )
     return {
         "total_functions_scanned": total,
         "functions_safe_no_handles": len(safe),
         "functions_allocating_handles": len(allocating),
-        "functions_with_cleanup": len(with_cleanup),
+        "functions_with_cleanup": len(fully_protected),
+        "functions_partial_cleanup": len(partial),
+        "functions_conditional_cleanup": len(conditional),
         "unprotected_functions": len(unprotected),
-        # Primary UX metric (ring)
+        "functions_incomplete_cleanup": len(partial) + len(conditional),
+        # Primary UX metric (ring) — incomplete cleanup does NOT inflate safety
         "handle_safety_rate": handle_safety_rate,
-        # Secondary: cleanup rate among allocators only
+        # Secondary: full cleanup rate among allocators only
         "recycle_coverage_rate": recycle_among_allocators,
+        # Compatibility: any cleanup signal (partial/conditional/protected)
+        "functions_any_cleanup_signal": len(with_cleanup),
     }
 
 
@@ -560,9 +556,16 @@ def run_function_inventory(
 
     # Inventory all language-interesting units (not only keyword-prefiltered)
     interesting = apply_prefilter(units, require_keywords=False)
+    # Exclude pure formula from handle inventory (separate FORM-* track)
+    interesting = [u for u in interesting if (u.language or "").lower() != "formula"]
     records = build_inventory(interesting)
-    # Surface unprotected first, then protected, then safe
-    order = {"UNPROTECTED_ALLOCATION": 0, "PROTECTED": 1, "SAFE_NO_HANDLES": 2}
+    order = {
+        "UNPROTECTED_ALLOCATION": 0,
+        "PARTIAL_CLEANUP": 1,
+        "CONDITIONAL_CLEANUP": 2,
+        "PROTECTED": 3,
+        "SAFE_NO_HANDLES": 4,
+    }
     records.sort(key=lambda r: (order.get(r.status, 9), r.design_element, r.function_name))
 
     summary = summarize_inventory(records)
@@ -574,7 +577,10 @@ def run_function_inventory(
 
 __all__ = [
     "FunctionRecord",
+    "FunctionStatus",
     "build_inventory",
     "run_function_inventory",
     "summarize_inventory",
+    "ALLOCATION_PATTERNS",
+    "LS_ALLOCATION_PATTERNS",
 ]

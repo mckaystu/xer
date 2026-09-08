@@ -125,6 +125,19 @@ PROBLEM_BREAKDOWNS: dict[str, str] = {
         "AI cross-module analysis found a Document/NotesDocument passed or returned across functions "
         "where neither caller nor callee clearly owns recycle/Delete."
     ),
+    "DOM-OWN-001": (
+        "Static call-graph analysis found a Domino handle returned or accepted across a function "
+        "boundary without Delete/.recycle() on either the callee or the caller after the call."
+    ),
+    "FORM-001": (
+        "Formula repeats @DbLookup/@DbColumn. Each call hits NSF/NIF and can dominate computed-field cost."
+    ),
+    "FORM-002": (
+        "Formula loops (@While/@For) while calling @DbLookup/@DbColumn — lookup cost scales with iterations."
+    ),
+    "FORM-003": (
+        "Formula embeds a credential-like literal or plaintext http:// endpoint."
+    ),
     "SEC-001": (
         "A password or secret is hardcoded in source and used with an http:// endpoint, exposing "
         "credentials in cleartext."
@@ -250,6 +263,25 @@ REMEDIATION_GUIDES: dict[str, dict[str, str]] = {
     "DOM-BS-002": {
         "lotusscript": "Document ownership: either callee Deletes before return, or caller Deletes after use — never neither.",
         "java": "Clarify ownership: recycle in callee before return, or in caller after use — never neither.",
+    },
+    "DOM-OWN-001": {
+        "lotusscript": "Document ownership: either callee Deletes before return, or caller Deletes after use — never neither.",
+        "java": "Clarify ownership: recycle in callee before return, or in caller after use — never neither.",
+    },
+    "FORM-001": {
+        "lotusscript": "Cache @DbLookup results or move batch lookups to LotusScript/Java.",
+        "java": "Cache lookups or move batch work out of formula.",
+        "formula": "Reduce repeated @DbLookup/@DbColumn; cache results in fields where possible.",
+    },
+    "FORM-002": {
+        "formula": "Hoist @DbLookup outside @While/@For, or precompute in an agent.",
+        "lotusscript": "Hoist lookups outside formula loops.",
+        "java": "Hoist lookups outside formula loops.",
+    },
+    "FORM-003": {
+        "formula": "Remove hardcoded secrets; use HTTPS endpoints only.",
+        "lotusscript": "Remove hardcoded secrets; use HTTPS endpoints only.",
+        "java": "Remove hardcoded secrets; use HTTPS endpoints only.",
     },
     "SEC-001": {
         "lotusscript": "Store credentials outside source (env/secret store); call https:// endpoints only.",
