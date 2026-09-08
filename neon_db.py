@@ -562,7 +562,7 @@ def ensure_audit_snapshot(
                 WHERE id = %s
                 RETURNING audit_snapshot_at
                 """,
-                (Json(snapshot), UUID(graph_id)),
+                (Json(snapshot), str(graph_id)),
             )
             ts = cur.fetchone()[0]
         conn.commit()

@@ -85,12 +85,12 @@ def decode_filedata_bytes(raw: bytes) -> str:
     for marker in _SOURCE_MARKERS:
         idx = s_utf.find(marker)
         if idx >= 0:
-            return s_utf[idx:].replace("\r\n", "\n").replace("\r", "\n").rstrip("\x00").rstrip()
+            return _clean_source(s_utf[idx:])
     s_lat = raw.decode("latin-1", errors="ignore")
     for marker in _SOURCE_MARKERS:
         idx = s_lat.find(marker)
         if idx >= 0:
-            return s_lat[idx:].replace("\r\n", "\n").replace("\r", "\n").rstrip("\x00").rstrip()
+            return _clean_source(s_lat[idx:])
     i = 0
     while i < len(raw) and raw[i] < 32 and raw[i] not in (9, 10, 13):
         i += 1
@@ -99,14 +99,16 @@ def decode_filedata_bytes(raw: bytes) -> str:
         if len(window) == 8 and all(32 <= b < 127 or b in (9, 10, 13) for b in window):
             break
         i += 1
-    return (
-        raw[i:]
-        .decode("utf-8", errors="ignore")
-        .replace("\r\n", "\n")
-        .replace("\r", "\n")
-        .rstrip("\x00")
-        .rstrip()
-    )
+    return _clean_source(raw[i:].decode("utf-8", errors="ignore"))
+
+
+def _clean_source(text: str) -> str:
+    """Normalize newlines and drop NULs / non-text control bytes for JSON/Postgres."""
+    text = text.replace("\r\n", "\n").replace("\r", "\n")
+    text = text.replace("\x00", "")
+    # Drop other C0 controls except tab/newline
+    text = "".join(ch for ch in text if ord(ch) >= 32 or ch in "\t\n")
+    return text.rstrip()
 
 
 def decode_filedata_chunks(raw_b64_chunks: Iterable[str]) -> str:
@@ -119,9 +121,16 @@ def decode_filedata_chunks(raw_b64_chunks: Iterable[str]) -> str:
             raw = base64.b64decode(data, validate=False)
         except Exception:  # noqa: BLE001
             continue
-        if raw:
-            parts.append(decode_filedata_bytes(raw))
-    return "".join(parts).rstrip()
+        if not raw:
+            continue
+        # Skip obvious binary/class payloads (low printable ratio)
+        printable = sum(32 <= b < 127 or b in (9, 10, 13) for b in raw) / max(1, len(raw))
+        if printable < 0.55 and b"<?xml" not in raw[:80] and b"package " not in raw[:120]:
+            continue
+        part = decode_filedata_bytes(raw)
+        if part:
+            parts.append(part)
+    return _clean_source("".join(parts))
 
 
 def _note_title(note: ET.Element) -> str | None:

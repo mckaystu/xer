@@ -1156,7 +1156,21 @@ class DXLFileParser:
 
 
 def to_plain(obj: Any) -> Any:
-    if isinstance(obj, (FormModel, ViewModel, AgentModel, ScriptLibraryModel, FieldModel, ColumnModel, CodeBlock, DesignElementRef, Edge)):
+    if isinstance(
+        obj,
+        (
+            FormModel,
+            ViewModel,
+            AgentModel,
+            ScriptLibraryModel,
+            FileResourceModel,
+            FieldModel,
+            ColumnModel,
+            CodeBlock,
+            DesignElementRef,
+            Edge,
+        ),
+    ):
         return {k: to_plain(v) for k, v in asdict(obj).items()}
     if isinstance(obj, list):
         return [to_plain(item) for item in obj]

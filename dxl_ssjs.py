@@ -74,9 +74,9 @@ def decode_server_javascript_chunks(raw_b64_chunks: Iterable[str]) -> str:
         parts.append(_strip_notes_header(raw))
     body = "".join(parts)
     body = body.replace("\r\n", "\n").replace("\r", "\n")
-    # Trailing NULs / junk after last function
-    body = body.rstrip("\x00").rstrip()
-    return body
+    body = body.replace("\x00", "")
+    body = "".join(ch for ch in body if ord(ch) >= 32 or ch in "\t\n")
+    return body.rstrip()
 
 
 def iter_server_javascript_rawitemdata(scriptlibrary_elem: ET.Element) -> list[str]:
