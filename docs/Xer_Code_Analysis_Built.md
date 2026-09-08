@@ -45,15 +45,15 @@ DXL / ODP / application graph
 
 **Loop-aware severity**
 
-- Allocation **inside** a collection loop → **CRITICAL** (handle exhaustion)
-- One-shot helpers (e.g. `EncodeBase64`) → **LOW** / **MEDIUM** (routine hygiene)
-- Non-loop remediation uses linear `Delete` / `try-finally`, not `GetNextDocument` loop templates
+- Allocation **inside** a Java/SSJS collection loop → **CRITICAL** (C-API handle exhaustion)
+- One-shot Java/SSJS helpers → **LOW** / **MEDIUM** (routine hygiene)
+- **LotusScript is outside Handle Exhaustion** — LS-DOM-* may still appear under “LotusScript hygiene” but do **not** drive `handle_exhaustion_risk`, the inventory ring, or graph exhaustion badges
 
 ---
 
 ## Static rule catalog
 
-### Handle lifecycle — Java / SSJS (`DOM-001` … `DOM-016`)
+### Handle lifecycle — Java / SSJS (`DOM-001` … `DOM-016`) — *Handle Exhaustion*
 
 | ID | Focus |
 |----|--------|
@@ -68,7 +68,9 @@ DXL / ODP / application graph
 | DOM-015 | Un-recycled ViewNavigator / ViewEntryCollection |
 | DOM-016 | `search` / `FTSearch` collection leaks in loops |
 
-### Handle lifecycle — LotusScript (`LS-DOM-001` … `LS-DOM-008`)
+### LotusScript Delete hygiene (`LS-DOM-001` … `LS-DOM-008`) — *not exhaustion*
+
+LotusScript object lifetimes do not map 1:1 to Java C-API handle-table exhaustion. These rules remain available for Delete hygiene review but are **excluded** from Handle Exhaustion Risk / inventory / badges.
 
 | ID | Focus |
 |----|--------|
@@ -109,32 +111,23 @@ Catalog lives in `analytics/code_auditor/models.py`. Detectors: `rules.py`, `ls_
 
 ## Function inventory
 
-`analytics/code_auditor/function_inventory.py` inventories every Sub/Function/method and classifies:
+Primary Handle Exhaustion inventory covers **Java / SSJS / XPages** only (`handle_exhaustion_scope: java_javascript_xpages`). LotusScript units are skipped (`lotus_script_units_skipped`).
 
 | Status | Meaning |
 |--------|---------|
 | `SAFE_NO_HANDLES` | No Domino allocation signals |
-| `PROTECTED` | Allocates + every named handle cleaned (or unconditional cleanup) |
-| `PARTIAL_CLEANUP` | Some allocated vars cleaned; others missing `Delete` / `.recycle()` |
-| `CONDITIONAL_CLEANUP` | Cleanup only under `If` (no `finally` / unconditional release) |
+| `PROTECTED` | Allocates + matching `.recycle()` cleanup |
+| `PARTIAL_CLEANUP` / `CONDITIONAL_CLEANUP` / `ESCAPE_PATH_GAP` | Incomplete recycle paths |
 | `UNPROTECTED_ALLOCATION` | Allocates with no explicit cleanup |
 
-**Metrics**
-
-- **Handle safety rate** (primary UI ring): `(safe + fully protected) / scanned` — partial/conditional do **not** inflate the rate
-- **Recycle coverage** (secondary): `fully_protected / allocators`
-
-Shared API catalog: `analytics/code_auditor/api_catalog.py` (Notes* types + alloc methods).
-
-Inventory deep-dives are also loop-aware: non-loop unprotected helpers show **LOW** severity and linear cleanup templates (not CRITICAL exhaustion messaging).
-
+**Handle safety rate** = `(safe + fully protected) / Java-JS scanned` — LS does not inflate or depress this ring.
 ---
 
 ## Deterministic ownership (`DOM-OWN-001`)
 
 Static call-graph ownership lives in `ownership_rules.py`. It flags handle returns/parameters where neither caller nor callee cleans up.
 
-When the application graph is available, callees are scoped to the **same design element** or to **script libraries linked by `USES_SCRIPT_LIBRARY`** / `Use "Lib"` — so cross-library ownership is deterministic without LLM.
+When the application graph is available, callees are scoped to the **same design element** or to **script libraries linked by `USES_SCRIPT_LIBRARY`** / `Use "Lib"`. Ownership analysis runs on **Java / SSJS** units only (LotusScript skipped).
 
 LLM Pass 3 (`DOM-BS-002`) still runs for residual gaps and severity escalation, and **skips elements already covered by `DOM-OWN-001`**.
 
@@ -247,7 +240,7 @@ python3 domino_dxl_auditor.py --graph application_graph.json --out-dir analysis
 
 Against `dxl_input_fromboss/Code_FrombossRest.dxl`:
 
-- **`EncodeBase64`**: `LS-DOM-004` at **LOW**, inventory **LOW**, linear `Delete` To-Be (no loop template)
+- **`EncodeBase64`**: `LS-DOM-004` at catalog **MEDIUM** (LotusScript hygiene; not Handle Exhaustion)
 - **`upgrade_scan`**: LotusScript DB refs only; **0** false Java `getDatabase` counts
 - **SEC-001 / SEC-002**: fire on hardcoded HTTP credentials and query-driven UNID lookups where present
 

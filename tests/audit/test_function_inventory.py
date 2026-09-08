@@ -67,21 +67,53 @@ class TestInventoryClassification:
 
 
 class TestInventorySummaryMetrics:
-    def test_summarize_rates(self, ls_cases_by_id: dict[str, FixtureCase]):
+    def test_summarize_rates_java_only(self, java_cases_by_id: dict[str, FixtureCase]):
         units = [
-            case_to_unit(ls_cases_by_id["ls_inventory_protected"]),
-            case_to_unit(ls_cases_by_id["ls_dom001_leak"]),
-            case_to_unit(ls_cases_by_id["ls_safe_no_handles"]),
+            case_to_unit(java_cases_by_id["java_inventory_protected"]),
+            case_to_unit(java_cases_by_id["dom002_loop_no_recycle"]),
         ]
         recs = build_inventory(units)
         summary = summarize_inventory(recs)
-        assert summary["total_functions_scanned"] >= 3
+        assert summary["total_functions_scanned"] >= 2
+        assert summary["handle_exhaustion_scope"] == "java_javascript_xpages"
         assert 0 <= summary["handle_safety_rate"] <= 100
-        assert 0 <= summary["recycle_coverage_rate"] <= 100
-        # One protected + one safe + one unprotected → safety = 2/3 ≈ 66.7
         assert summary["unprotected_functions"] >= 1
-        assert summary["functions_with_cleanup"] >= 1
-        assert summary["functions_safe_no_handles"] >= 1
+
+    def test_lotus_script_excluded_from_ring(self, ls_cases_by_id: dict[str, FixtureCase]):
+        units = [
+            case_to_unit(ls_cases_by_id["ls_inventory_protected"]),
+            case_to_unit(ls_cases_by_id["ls_dom001_leak"]),
+        ]
+        recs = build_inventory(units)
+        summary = summarize_inventory(recs)
+        # LS records do not count toward Handle Exhaustion ring
+        assert summary["total_functions_scanned"] == 0
+        assert summary["handle_safety_rate"] == 100.0
+        assert summary["lotus_script_functions_excluded"] >= 2
+
+    def test_run_function_inventory_skips_lotus(self):
+        graph = {
+            "business_logic": [
+                {
+                    "language": "lotusscript",
+                    "owner_name": "Agent1",
+                    "owner_type": "agent",
+                    "body": "Sub Initialize\n  Dim doc As NotesDocument\n  Set doc = db.GetDocumentByUNID(\"x\")\nEnd Sub\n",
+                    "source_file": "a.dxl",
+                },
+                {
+                    "language": "java",
+                    "owner_name": "JavaAgent",
+                    "owner_type": "agent",
+                    "body": "void walk() {\n  Document doc = coll.getFirstDocument();\n  while (doc != null) {\n    Document next = coll.getNextDocument(doc);\n    doc = next;\n  }\n}\n",
+                    "source_file": "j.dxl",
+                },
+            ]
+        }
+        result = run_function_inventory(graph=graph)
+        assert result["summary"]["lotus_script_units_skipped"] >= 1
+        langs = {r["language"] for r in result["inventory"]}
+        assert "LotusScript" not in langs
 
     def test_run_function_inventory_on_mock_graph(self, mock_xboss_graph: dict):
         result = run_function_inventory(graph=mock_xboss_graph)

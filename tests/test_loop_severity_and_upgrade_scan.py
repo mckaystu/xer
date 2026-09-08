@@ -31,7 +31,7 @@ def ls(name: str, body: str) -> CodeUnit:
 
 
 class TestLoopAwareSeverity:
-    def test_encode_base64_is_low_non_loop(self):
+    def test_encode_base64_is_ls_hygiene_not_exhaustion(self):
         unit = ls(
             "EncodeBase64",
             """
@@ -50,18 +50,18 @@ End Function
         )
         findings = run_rule_engine([unit])
         assert findings
-        assert all(f.severity in {"LOW", "MEDIUM"} for f in findings)
-        assert any(f.rule_id == "LS-DOM-004" and f.severity == "LOW" for f in findings)
+        assert any(f.rule_id == "LS-DOM-004" and f.severity == "MEDIUM" for f in findings)
         rem = findings[0].remediation or findings[0].code_snippet_to_be
         assert "GetNextDocument" not in rem
         assert "Delete" in rem
-        assert "Non-loop" in (findings[0].technical_impact or "")
+
+        # build_inventory can still classify LS units for hygiene; Handle Exhaustion ring uses run_function_inventory
+        from analytics.code_auditor.function_inventory import summarize_inventory
 
         inv = build_inventory([unit])
-        enc = next(r for r in inv if r.function_name == "EncodeBase64")
-        assert enc.in_loop is False
-        assert enc.risk_severity == "LOW"
-        assert "GetNextDocument" not in enc.code_snippet_to_be
+        summary = summarize_inventory(inv)
+        assert summary.get("lotus_script_functions_excluded", 0) >= 1
+        assert summary["total_functions_scanned"] == 0
 
     def test_loop_leak_stays_critical(self):
         unit = ls(
@@ -83,8 +83,12 @@ End Sub
         assert ls001[0].severity == "CRITICAL"
 
     def test_calibrate_helper(self):
-        assert calibrate_handle_severity("LS-DOM-004", "MEDIUM", in_loop=False) == "LOW"
-        assert calibrate_handle_severity("LS-DOM-004", "MEDIUM", in_loop=True) == "CRITICAL"
+        # LotusScript rules are not loop-calibrated for C-API exhaustion
+        assert calibrate_handle_severity("LS-DOM-004", "MEDIUM", in_loop=False) == "MEDIUM"
+        assert calibrate_handle_severity("LS-DOM-004", "MEDIUM", in_loop=True) == "MEDIUM"
+        # Java/SSJS recycle rules still escalate in loops
+        assert calibrate_handle_severity("DOM-001", "HIGH", in_loop=True) == "CRITICAL"
+        assert calibrate_handle_severity("DOM-001", "HIGH", in_loop=False) == "MEDIUM"
         assert body_has_loop("Do While Not doc Is Nothing") is True
         assert body_has_loop("Function EncodeBase64") is False
 

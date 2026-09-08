@@ -199,6 +199,15 @@ function computeNodeIssues() {
   const findings = currentCodeAudit?.findings || [];
   findings.forEach((finding, idx) => {
     if (finding.is_false_positive) return;
+    // Handle Exhaustion badges: Java / SSJS / XPages C-API recycle only
+    if (findingCategoryBucket(finding) !== "handle" && findingCategoryBucket(finding) !== "ownership") {
+      if (findingCategoryBucket(finding) === "ai") {
+        const lang = String(finding.language || "").toLowerCase();
+        if (lang.includes("lotus") || lang === "ls" || lang === "lss") return;
+      } else {
+        return;
+      }
+    }
     const et = finding.element_type || "";
     const en = finding.element_name || "";
     if (!et || !en) return;
@@ -960,10 +969,15 @@ function renderFunctionInventoryCard(inventory) {
         and <strong>${unprotected}</strong> are unprotected.
         ${
           unprotected + incomplete > 0
-            ? ` Open an <strong>Unprotected</strong> / <strong>Partial</strong> row below to see missing <code>Delete</code> / <code>.recycle()</code>.`
+            ? ` Open an <strong>Unprotected</strong> / <strong>Partial</strong> row below to see missing <code>.recycle()</code>.`
             : ""
         }
       </p>
+      ${
+        s.lotus_script_units_skipped
+          ? `<p class="coverage-sub"><em>${s.lotus_script_units_skipped}</em> LotusScript unit(s) skipped for Handle Exhaustion inventory.</p>`
+          : ""
+      }
     </div>`;
 
   return `
@@ -978,8 +992,9 @@ function renderFunctionInventoryCard(inventory) {
           <div class="score-copy">
             <p class="score-rating">Handle Safety Rate</p>
             <p class="score-hint">
-              Share of <em>all</em> scanned functions that are either handle-free or that allocate
-              and also call <code>Delete</code> / <code>.recycle()</code>.
+              Share of <em>Java / SSJS / XPages</em> functions that are handle-free or that
+              allocate and call <code>.recycle()</code>. LotusScript is excluded — it does not
+              share the same C-API handle-table exhaustion model.
             </p>
             <div class="score-metrics inventory-metrics">
               <div class="metric"><span class="metric-label">Functions scanned</span><strong>${scanned}</strong></div>
@@ -1120,17 +1135,25 @@ function findingFilterBucket(f) {
 function findingCategoryBucket(f) {
   const rid = String(f.rule_id || "");
   const cat = String(f.category || "");
+  const lang = String(f.language || "").toLowerCase();
   if (rid.startsWith("PERF-") || cat.includes("Performance") || cat.includes("NIF")) {
     return "performance";
   }
   if (rid.startsWith("FORM-") || cat.includes("Formula")) {
     return "formula";
   }
+  if (rid.startsWith("LS-DOM") || cat.includes("LotusScript")) {
+    return "ls_hygiene";
+  }
   if (rid.startsWith("DOM-OWN") || cat.includes("Handle Ownership")) {
     return "ownership";
   }
   if (rid.startsWith("DOM-BS") || f.is_blind_spot || cat.includes("AI Discrepancy")) {
     return "ai";
+  }
+  // C-API recycle (Java / SSJS / XPages) — exclude LotusScript language hits
+  if (lang.includes("lotus") || lang === "ls" || lang === "lss") {
+    return "ls_hygiene";
   }
   return "handle";
 }
@@ -1150,6 +1173,7 @@ function filterAuditFindings(findings, filter) {
       if (filter === "performance") return cat === "performance" && !f.is_false_positive;
       if (filter === "formula") return cat === "formula" && !f.is_false_positive;
       if (filter === "ownership") return cat === "ownership" && !f.is_false_positive;
+      if (filter === "ls_hygiene") return cat === "ls_hygiene" && !f.is_false_positive;
       if (filter === "ai_discovered") return cat === "ai" || bucket === "blind_spot";
       return true;
     });
@@ -1235,6 +1259,7 @@ function renderCodeAuditCard(audit) {
   const perfCount = findings.filter((f) => findingCategoryBucket(f) === "performance" && !f.is_false_positive).length;
   const formulaCount = findings.filter((f) => findingCategoryBucket(f) === "formula" && !f.is_false_positive).length;
   const ownershipCount = findings.filter((f) => findingCategoryBucket(f) === "ownership" && !f.is_false_positive).length;
+  const lsHygieneCount = findings.filter((f) => findingCategoryBucket(f) === "ls_hygiene" && !f.is_false_positive).length;
   const aiCatCount = findings.filter(
     (f) => findingCategoryBucket(f) === "ai" || findingFilterBucket(f) === "blind_spot"
   ).length;
@@ -1245,17 +1270,18 @@ function renderCodeAuditCard(audit) {
       <div class="score-card ${riskClass}">
         <div class="score-copy" style="margin-bottom:12px">
           <p class="score-rating">Handle Exhaustion Risk: ${escapeHtml(risk)}</p>
-          <p class="score-hint">${findings.length} findings ·
-            C:${counts.CRITICAL || 0} H:${counts.HIGH || 0} M:${counts.MEDIUM || 0} L:${counts.LOW || 0}
+          <p class="score-hint">C-API <code>.recycle()</code> for <strong>Java / SSJS / XPages</strong> only — LotusScript Delete hygiene is tracked separately and does not drive this score.
+            ${findings.length} findings · Exhaustion C:${(audit.handle_exhaustion_severity_counts || counts).CRITICAL || 0} H:${(audit.handle_exhaustion_severity_counts || counts).HIGH || 0}
             · scanned ${audit.blocks_prefiltered || 0}/${audit.blocks_scanned || 0} code blocks
             · ${audit.llm_enabled ? "AI discrepancy on" : "rules-only"}
             · click a row for As-Is / To-Be deep-dive</p>
           <div class="findings-filter-bar" role="toolbar" aria-label="Category filters">
             ${filterBtn("all", "All Findings", findings.length)}
-            ${filterBtn("handle", "Handle Leaks", handleCount)}
+            ${filterBtn("handle", "Handle Exhaustion (Java/JS)", handleCount)}
             ${filterBtn("ownership", "Ownership", ownershipCount)}
             ${filterBtn("performance", "Performance & NIF", perfCount)}
             ${filterBtn("formula", "Formula", formulaCount)}
+            ${filterBtn("ls_hygiene", "LotusScript hygiene", lsHygieneCount)}
             ${filterBtn("ai_discovered", "AI Discovered", aiCatCount)}
           </div>
           <div class="findings-filter-bar" role="toolbar" aria-label="AI validation filters">
@@ -1357,9 +1383,9 @@ function renderCodeAuditTeaser(audit, inventory) {
       <div class="score-card ${riskClass}">
         <div class="score-copy">
           <p class="score-rating">Handle Exhaustion Risk: ${escapeHtml(risk)}</p>
-          <p class="score-hint">${n} findings · C:${counts.CRITICAL || 0} H:${counts.HIGH || 0} M:${counts.MEDIUM || 0} L:${counts.LOW || 0}${
+          <p class="score-hint">${n} findings · Java/JS C-API recycle scope · C:${counts.CRITICAL || 0} H:${counts.HIGH || 0}${
             typeof rate === "number"
-              ? ` · recycle coverage ${rate}% (${unprot || 0} unprotected)`
+              ? ` · handle safety ${rate}% (${unprot || 0} unprotected)`
               : ""
           }</p>
           <p class="overview-sub"><a href="#" id="openCodeTab">Open Code Analysis for inventory &amp; deep-dive →</a></p>
@@ -1379,7 +1405,7 @@ function renderCodeAnalysis() {
   codeAnalysisContent.innerHTML = `
     <div class="overview-header">
       <h2>Code Analysis</h2>
-      <p class="overview-sub">Function inventory with recycle coverage, plus C-API handle findings — click a finding for As-Is / To-Be remediation. Optionally run AI discrepancy audit for false positives and blind spots.</p>
+      <p class="overview-sub">Java / SSJS / XPages C-API <code>.recycle()</code> inventory and handle findings — LotusScript Delete rules are hygiene-only and do not drive Handle Exhaustion. Click a finding for As-Is / To-Be remediation.</p>
     </div>
     ${renderFunctionInventoryCard(currentFunctionInventory)}
     ${renderCodeAuditCard(currentCodeAudit)}

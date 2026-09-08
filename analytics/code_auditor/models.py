@@ -289,9 +289,21 @@ class AuditReport:
         """Findings that still count toward risk (excludes AI false positives)."""
         return [f for f in self.findings if not f.is_false_positive]
 
+    def handle_exhaustion_findings(self) -> list[Finding]:
+        """Java / SSJS / XPages C-API recycle findings only (not LotusScript Delete hygiene)."""
+        from analytics.code_auditor.context import contributes_to_handle_exhaustion
+
+        return [f for f in self.active_findings() if contributes_to_handle_exhaustion(f)]
+
     def severity_counts(self) -> dict[str, int]:
         counts = {"CRITICAL": 0, "HIGH": 0, "MEDIUM": 0, "LOW": 0}
         for f in self.active_findings():
+            counts[f.severity] = counts.get(f.severity, 0) + 1
+        return counts
+
+    def handle_exhaustion_severity_counts(self) -> dict[str, int]:
+        counts = {"CRITICAL": 0, "HIGH": 0, "MEDIUM": 0, "LOW": 0}
+        for f in self.handle_exhaustion_findings():
             counts[f.severity] = counts.get(f.severity, 0) + 1
         return counts
 
@@ -311,18 +323,20 @@ class AuditReport:
         }
 
     def risk_score(self) -> str:
-        counts = self.severity_counts()
+        """Handle Exhaustion Risk from Java/JS/XPages recycle findings only."""
+        counts = self.handle_exhaustion_severity_counts()
         if counts["CRITICAL"] >= 3 or (counts["CRITICAL"] >= 1 and counts["HIGH"] >= 3):
             return "CRITICAL"
         if counts["CRITICAL"] >= 1 or counts["HIGH"] >= 3:
             return "HIGH"
         if counts["HIGH"] >= 1 or counts["MEDIUM"] >= 5:
             return "MEDIUM"
-        if self.active_findings():
+        if self.handle_exhaustion_findings():
             return "LOW"
         return "LOW"
 
     def to_dict(self) -> dict[str, Any]:
+        exh = self.handle_exhaustion_findings()
         return {
             "source": self.source,
             "files_scanned": self.files_scanned,
@@ -331,6 +345,9 @@ class AuditReport:
             "llm_enabled": self.llm_enabled,
             "notes": self.notes,
             "severity_counts": self.severity_counts(),
+            "handle_exhaustion_severity_counts": self.handle_exhaustion_severity_counts(),
+            "handle_exhaustion_findings_count": len(exh),
+            "handle_exhaustion_scope": "java_javascript_xpages",
             "handle_exhaustion_risk": self.risk_score(),
             "ai_discrepancy_summary": self.ai_discrepancy_summary(),
             "findings": [f.to_dict() for f in self.findings],

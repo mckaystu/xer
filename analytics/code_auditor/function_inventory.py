@@ -22,6 +22,8 @@ from analytics.code_auditor.context import (
     NON_LOOP_HYGIENE_NOTE,
     body_has_loop,
     inventory_risk_severity,
+    is_capi_handle_language,
+    is_lotusscript_language,
 )
 from analytics.code_auditor.extractor import (
     apply_prefilter,
@@ -522,21 +524,21 @@ def build_inventory(units: Iterable[CodeUnit]) -> list[FunctionRecord]:
 
 
 def summarize_inventory(records: list[FunctionRecord]) -> dict[str, Any]:
-    total = len(records)
-    allocating = [r for r in records if r.allocates_handles]
+    """Primary rates are Java/SSJS/XPages only — LotusScript is not C-API handle exhaustion."""
+    capi = [r for r in records if is_capi_handle_language(r.language)]
+    ls_recs = [r for r in records if is_lotusscript_language(r.language)]
+    total = len(capi)
+    allocating = [r for r in capi if r.allocates_handles]
     fully_protected = [r for r in allocating if r.status == "PROTECTED"]
     partial = [r for r in allocating if r.status == "PARTIAL_CLEANUP"]
     conditional = [r for r in allocating if r.status == "CONDITIONAL_CLEANUP"]
     escape_gaps = [r for r in allocating if r.status == "ESCAPE_PATH_GAP"]
     unprotected = [r for r in allocating if r.status == "UNPROTECTED_ALLOCATION"]
-    # Legacy "with cleanup" = any presence of cleanup (not fully unprotected)
     with_cleanup = [r for r in allocating if r.status != "UNPROTECTED_ALLOCATION"]
-    safe = [r for r in records if not r.allocates_handles]
-    # Among allocators: only fully protected count toward recycle coverage honesty
+    safe = [r for r in capi if not r.allocates_handles]
     recycle_among_allocators = (
         round((len(fully_protected) / len(allocating)) * 100.0, 1) if allocating else 100.0
     )
-    # Overall: only SAFE + fully PROTECTED count as "safe" for the ring
     handle_safety_rate = (
         round(((len(safe) + len(fully_protected)) / total) * 100.0, 1) if total else 100.0
     )
@@ -550,12 +552,12 @@ def summarize_inventory(records: list[FunctionRecord]) -> dict[str, Any]:
         "functions_escape_path_gap": len(escape_gaps),
         "unprotected_functions": len(unprotected),
         "functions_incomplete_cleanup": len(partial) + len(conditional) + len(escape_gaps),
-        # Primary UX metric (ring) — incomplete cleanup does NOT inflate safety
         "handle_safety_rate": handle_safety_rate,
-        # Secondary: full cleanup rate among allocators only
         "recycle_coverage_rate": recycle_among_allocators,
-        # Compatibility: any cleanup signal (partial/conditional/protected)
         "functions_any_cleanup_signal": len(with_cleanup),
+        "handle_exhaustion_scope": "java_javascript_xpages",
+        "lotus_script_functions_excluded": len(ls_recs),
+        "all_languages_functions_scanned": len(records),
     }
 
 
@@ -564,7 +566,12 @@ def run_function_inventory(
     *,
     graph: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    """Build function inventory + recycle coverage summary from a path or graph."""
+    """Build function inventory + recycle coverage summary from a path or graph.
+
+    Handle Exhaustion inventory (ring metrics) covers Java / SSJS / XPages only.
+    LotusScript units are omitted from the primary inventory — LS does not share
+    the same C-API recycle / handle-table exhaustion model.
+    """
     if graph is not None:
         units = extract_units_from_graph(graph)
     elif source is not None:
@@ -572,11 +579,12 @@ def run_function_inventory(
     else:
         raise ValueError("Provide source path or graph=")
 
-    # Inventory all language-interesting units (not only keyword-prefiltered)
     interesting = apply_prefilter(units, require_keywords=False)
-    # Exclude pure formula from handle inventory (separate FORM-* track)
     interesting = [u for u in interesting if (u.language or "").lower() != "formula"]
-    records = build_inventory(interesting)
+    ls_skipped = sum(1 for u in interesting if is_lotusscript_language(u.language))
+    # Primary C-API recycle inventory — Java / JS / XPages libraries & agents
+    capi_units = [u for u in interesting if is_capi_handle_language(u.language)]
+    records = build_inventory(capi_units)
     order = {
         "UNPROTECTED_ALLOCATION": 0,
         "ESCAPE_PATH_GAP": 1,
@@ -588,6 +596,7 @@ def run_function_inventory(
     records.sort(key=lambda r: (order.get(r.status, 9), r.design_element, r.function_name))
 
     summary = summarize_inventory(records)
+    summary["lotus_script_units_skipped"] = ls_skipped
     return {
         "summary": summary,
         "inventory": [r.to_dict() for r in records],

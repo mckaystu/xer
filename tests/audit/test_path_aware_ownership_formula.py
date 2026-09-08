@@ -89,6 +89,49 @@ class TestOwnershipStatic:
         bind_own(finding=_finding, line_of=_line_of, snippet=_snippet)
 
     def test_return_without_cleanup(self):
+        unit = CodeUnit(
+            source_file="t.java",
+            element_name="OwnLib",
+            element_type="scriptlibrary",
+            language="java",
+            event=None,
+            body="""
+Document loadDoc(String uid) {
+  Document doc = db.getDocumentByUNID(uid);
+  return doc;
+}
+void caller() {
+  Document d = loadDoc("001");
+  System.out.println(d.getNoteID());
+}
+""",
+        )
+        findings = detect_dom_own001([unit])
+        assert any(f.rule_id == "DOM-OWN-001" for f in findings)
+
+    def test_caller_recycle_avoids_finding(self):
+        unit = CodeUnit(
+            source_file="t.java",
+            element_name="OwnOk",
+            element_type="scriptlibrary",
+            language="java",
+            event=None,
+            body="""
+Document loadDoc(String uid) {
+  Document doc = db.getDocumentByUNID(uid);
+  return doc;
+}
+void caller() {
+  Document d = loadDoc("001");
+  System.out.println(d.getNoteID());
+  d.recycle();
+}
+""",
+        )
+        findings = detect_dom_own001([unit])
+        assert not any(f.rule_id == "DOM-OWN-001" for f in findings)
+
+    def test_lotus_script_skipped_for_ownership(self):
         unit = _ls(
             "OwnLib",
             """
@@ -101,28 +144,6 @@ End Function
 Sub Caller
   Dim d As NotesDocument
   Set d = LoadDoc("001")
-  Print d.NoteID
-End Sub
-""",
-        )
-        findings = detect_dom_own001([unit])
-        assert any(f.rule_id == "DOM-OWN-001" for f in findings)
-
-    def test_caller_delete_avoids_finding(self):
-        unit = _ls(
-            "OwnOk",
-            """
-Function LoadDoc(uid As String) As NotesDocument
-  Dim doc As NotesDocument
-  Set doc = db.GetDocumentByUNID(uid)
-  Set LoadDoc = doc
-End Function
-
-Sub Caller
-  Dim d As NotesDocument
-  Set d = LoadDoc("001")
-  Print d.NoteID
-  Delete d
 End Sub
 """,
         )
@@ -131,31 +152,29 @@ End Sub
 
     def test_cross_library_via_uses_edge(self):
         agent = CodeUnit(
-            source_file="a.dxl",
+            source_file="a.java",
             element_name="ReportAgent",
             element_type="agent",
-            language="lotusscript",
+            language="java",
             event=None,
             body="""
-Sub Initialize
-  Dim d As NotesDocument
-  Set d = LoadDoc("001")
-  Print d.NoteID
-End Sub
+void Initialize() {
+  Document d = loadDoc("001");
+  System.out.println(d.getNoteID());
+}
 """,
         )
         lib = CodeUnit(
-            source_file="lib.dxl",
+            source_file="lib.java",
             element_name="OpenLogFunctions",
             element_type="scriptlibrary",
-            language="lotusscript",
+            language="java",
             event=None,
             body="""
-Function LoadDoc(uid As String) As NotesDocument
-  Dim doc As NotesDocument
-  Set doc = db.GetDocumentByUNID(uid)
-  Set LoadDoc = doc
-End Function
+Document loadDoc(String uid) {
+  Document doc = db.getDocumentByUNID(uid);
+  return doc;
+}
 """,
         )
         edges = [
@@ -167,19 +186,17 @@ End Function
         ]
         findings = detect_dom_own001([agent, lib], edges=edges)
         assert any(f.rule_id == "DOM-OWN-001" for f in findings)
-        # Unrelated library should not match when edges are provided
         other = CodeUnit(
-            source_file="other.dxl",
+            source_file="other.java",
             element_name="OtherLib",
             element_type="scriptlibrary",
-            language="lotusscript",
+            language="java",
             event=None,
             body="""
-Function LoadDoc(uid As String) As NotesDocument
-  Dim doc As NotesDocument
-  Set doc = db.GetDocumentByUNID(uid)
-  Set LoadDoc = doc
-End Function
+Document loadDoc(String uid) {
+  Document doc = db.getDocumentByUNID(uid);
+  return doc;
+}
 """,
         )
         findings2 = detect_dom_own001([agent, other], edges=edges)

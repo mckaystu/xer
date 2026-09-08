@@ -347,7 +347,8 @@ End Sub
         )
         assert "LS-DOM-002" in rules(unit)
         f = findings_for(unit, "LS-DOM-002")[0]
-        assert f.severity == "CRITICAL"  # in-loop → handle exhaustion
+        # LotusScript hygiene — not C-API handle-exhaustion CRITICAL promotion
+        assert f.severity == "HIGH"
 
     def test_in_loop_createdocument_without_delete(self):
         unit = ls(
@@ -422,7 +423,8 @@ End Sub
         )
         assert "LS-DOM-004" in rules(unit)
         f = findings_for(unit, "LS-DOM-004")[0]
-        assert f.severity == "LOW"  # one-shot helper → routine hygiene
+        # Catalog MEDIUM — not demoted via C-API loop calibration (LS ≠ handle exhaustion)
+        assert f.severity == "MEDIUM"
         assert "Delete" in (f.code_snippet_to_be or "")
         assert "GetNextDocument" not in (f.code_snippet_to_be or "")
 

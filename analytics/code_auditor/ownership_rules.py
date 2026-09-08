@@ -268,6 +268,9 @@ def detect_dom_own001(
     for unit in units:
         if (unit.language or "").lower() == "formula":
             continue
+        if is_lotusscript(unit.language):
+            # LotusScript is outside C-API handle-exhaustion / recycle ownership model
+            continue
         for info in _extract_fns(unit):
             fns.setdefault(info.name.lower(), []).append(info)
             all_fns.append(info)

@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import re
-from typing import Literal
+from typing import Any, Literal
 
 Severity = Literal["CRITICAL", "HIGH", "MEDIUM", "LOW"]
 
@@ -16,8 +16,20 @@ RE_ANY_LOOP = re.compile(
     r")",
 )
 
+# C-API / Notes handle-table exhaustion applies to Java, SSJS, XPages — not LotusScript.
+# LotusScript object lifetimes are managed differently; LS-DOM-* is Delete hygiene, not DPOOL exhaustion.
+CAPI_HANDLE_LANG_TOKENS = (
+    "java",
+    "javascript",
+    "jscript",
+    "ssjs",
+    "xpage",
+    "xsp",
+)
+
 # Rules where missing cleanup inside a loop is handle-exhaustion (CRITICAL).
 # Outside a loop they are routine hygiene (MEDIUM/LOW).
+# LotusScript LS-DOM-* intentionally omitted — not the same C-API exhaustion model.
 LOOP_SENSITIVE_HANDLE_RULES = frozenset(
     {
         "DOM-001",
@@ -30,13 +42,6 @@ LOOP_SENSITIVE_HANDLE_RULES = frozenset(
         "DOM-014",
         "DOM-015",
         "DOM-016",
-        "LS-DOM-001",
-        "LS-DOM-002",
-        "LS-DOM-004",
-        "LS-DOM-005",
-        "LS-DOM-006",
-        "LS-DOM-007",
-        "LS-DOM-008",
         "DOM-BS-001",
         "DOM-BS-002",
         "DOM-OWN-001",
@@ -47,6 +52,35 @@ NON_LOOP_HYGIENE_NOTE = (
     "Non-loop single execution: Low risk of handle table exhaustion, "
     "recommended for general code hygiene."
 )
+
+
+def is_lotusscript_language(lang: str | None) -> bool:
+    low = (lang or "").lower()
+    return "lotus" in low or low in {"ls", "lss", "notes"}
+
+
+def is_capi_handle_language(lang: str | None) -> bool:
+    """True for Java / SSJS / JavaScript / XPages — languages that recycle() C-API handles."""
+    if is_lotusscript_language(lang):
+        return False
+    low = (lang or "").lower()
+    if low in {"formula", "unknown", ""}:
+        return False
+    return any(tok in low for tok in CAPI_HANDLE_LANG_TOKENS) or low in {"js", "source", "script"}
+
+
+def contributes_to_handle_exhaustion(finding: Any) -> bool:
+    """Whether a finding should drive Handle Exhaustion Risk (Java/JS C-API recycle only)."""
+    if getattr(finding, "is_false_positive", False):
+        return False
+    rid = getattr(finding, "rule_id", "") or ""
+    if rid.startswith("LS-DOM"):
+        return False
+    if rid.startswith(("PERF-", "SEC-", "FORM-")):
+        return False
+    if not rid.startswith("DOM-"):
+        return False
+    return is_capi_handle_language(getattr(finding, "language", None))
 
 
 def body_has_loop(body: str | None) -> bool:
