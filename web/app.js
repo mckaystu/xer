@@ -1268,7 +1268,7 @@ function renderCodeAuditCard(audit) {
       <div class="score-card ${riskClass}">
         <div class="score-copy" style="margin-bottom:12px">
           <p class="score-rating">Handle Exhaustion Risk: ${escapeHtml(risk)}</p>
-          <p class="score-hint">C-API <code>.recycle()</code> for <strong>Java / SSJS / XPages</strong> only — LotusScript is out of scope for Handle Exhaustion.
+          <p class="score-hint">C-API <code>.recycle()</code> for <strong>Java / SSJS / XPages</strong> only — LotusScript agents and libraries are out of scope and are not listed here.
             ${findings.length} findings · Exhaustion C:${(audit.handle_exhaustion_severity_counts || counts).CRITICAL || 0} H:${(audit.handle_exhaustion_severity_counts || counts).HIGH || 0}
             · scanned ${audit.blocks_prefiltered || 0}/${audit.blocks_scanned || 0} code blocks
             · ${audit.llm_enabled ? "AI discrepancy on" : "rules-only"}
@@ -1403,7 +1403,7 @@ function renderCodeAnalysis() {
   codeAnalysisContent.innerHTML = `
     <div class="overview-header">
       <h2>Code Analysis</h2>
-      <p class="overview-sub">Java / SSJS / XPages C-API <code>.recycle()</code> inventory and handle findings — LotusScript is out of scope for Handle Exhaustion. Click a finding for As-Is / To-Be remediation.</p>
+      <p class="overview-sub">Java / SSJS / XPages C-API <code>.recycle()</code> inventory and findings only — LotusScript is out of scope. Click a finding for As-Is / To-Be remediation.</p>
     </div>
     ${renderFunctionInventoryCard(currentFunctionInventory)}
     ${renderCodeAuditCard(currentCodeAudit)}

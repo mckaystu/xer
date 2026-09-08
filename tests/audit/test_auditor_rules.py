@@ -47,19 +47,11 @@ class TestLotusScriptHandleRulesDisabled:
         hit = rule_ids(case_to_unit(case))
         assert not any(r.startswith("LS-DOM") for r in hit), f"{case_id}: unexpected LS-DOM in {sorted(hit)}"
 
-    def test_annotation_contracts_ignore_ls_dom_expect(self, lotusscript_cases: list[FixtureCase]):
-        """PERF/SEC contracts still apply; LS-DOM @expect tags are ignored (detectors unwired)."""
+    def test_annotation_contracts_ignore_ls_expect(self, lotusscript_cases: list[FixtureCase]):
+        """LotusScript units emit no findings from this auditor."""
         for case in lotusscript_cases:
             hit = rule_ids(case_to_unit(case))
-            assert not any(r.startswith("LS-DOM") for r in hit), f"{case.case_id}: LS-DOM emitted"
-            expect = {r for r in case.expect if r.startswith(("PERF-", "SEC-", "FORM-"))}
-            forbid = {r for r in case.forbid if r.startswith(("PERF-", "SEC-", "FORM-", "DOM-"))}
-            if not expect and not forbid:
-                continue
-            missing = expect - hit
-            unexpected = forbid & hit
-            assert not missing, f"{case.case_id}: missing {sorted(missing)}; hit={sorted(hit)}"
-            assert not unexpected, f"{case.case_id}: unexpected {sorted(unexpected)}; hit={sorted(hit)}"
+            assert hit == set(), f"{case.case_id}: unexpected findings {sorted(hit)}"
 
 
 class TestJavaHandleRules:

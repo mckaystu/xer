@@ -58,10 +58,15 @@ def run_audit(
 
     enable_llm = llm_available() if use_llm is None else bool(use_llm)
     if enable_llm:
+        from analytics.code_auditor.context import is_capi_handle_language, is_lotusscript_language
+
+        # AI discrepancy only on Java / SSJS / XPages units
+        llm_units = [u for u in filtered if is_capi_handle_language(u.language)]
         findings, llm_notes = enrich_with_llm(
-            filtered, findings, max_units=max_llm_units, model=model
+            llm_units, findings, max_units=max_llm_units, model=model
         )
         notes.extend(llm_notes)
+        findings = [f for f in findings if not is_lotusscript_language(f.language)]
     else:
         notes.append("Rules-only mode (set OPENAI_API_KEY and pass --llm to enable AI enrichment).")
 

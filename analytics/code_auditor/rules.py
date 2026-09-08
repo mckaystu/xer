@@ -860,10 +860,12 @@ def run_rule_engine(
 
     findings: list[Finding] = []
     for unit in unit_list:
-        # Handle Exhaustion DOM-* : Java / SSJS / XPages only — never LotusScript
-        if not is_lotusscript_language(unit.language):
-            for detector in DETECTORS:
-                findings.extend(detector(unit))
+        # Code Analysis / Handle Exhaustion scope: Java / SSJS / XPages only.
+        # LotusScript units are skipped entirely (no DOM / PERF / SEC / FORM on LS).
+        if is_lotusscript_language(unit.language):
+            continue
+        for detector in DETECTORS:
+            findings.extend(detector(unit))
         for detector in PERF_DETECTORS:
             findings.extend(detector(unit))
         for detector in SEC_DETECTORS:
@@ -872,15 +874,8 @@ def run_rule_engine(
             findings.extend(detector(unit))
     # Cross-unit / cross-library ownership (needs full set + optional graph edges)
     findings.extend(run_ownership_detectors(unit_list, graph=graph, edges=edges))
-    # Hard filter: never emit C-API handle findings against LotusScript units
-    findings = [
-        f
-        for f in findings
-        if not (
-            is_lotusscript_language(f.language)
-            and (f.rule_id or "").startswith(("DOM-", "LS-DOM"))
-        )
-    ]
+    # Hard filter: never surface LotusScript findings in this auditor
+    findings = [f for f in findings if not is_lotusscript_language(f.language)]
     # Assign stable IDs
     for idx, finding in enumerate(findings, start=1):
         finding.id = f"F-{idx:03d}"

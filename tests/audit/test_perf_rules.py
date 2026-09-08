@@ -1,4 +1,7 @@
-"""Performance & NIF anti-pattern regression tests (PERF-001..004)."""
+"""Performance & NIF anti-pattern regression tests (PERF-001..004).
+
+PERF rules run on Java / SSJS / XPages only — LotusScript is out of auditor scope.
+"""
 
 from __future__ import annotations
 
@@ -15,27 +18,19 @@ class TestPerfCatalog:
             assert RULE_CATALOG[rid]["category"] == "Performance & NIF Indexing"
 
 
-class TestPerfLotusScript:
+class TestPerfLotusScriptSkipped:
     @pytest.mark.parametrize(
-        "case_id,rule",
+        "case_id",
         [
-            ("ls_perf001_no_autoupdate", "PERF-001"),
-            ("ls_perf002_getview_loop", "PERF-002"),
-            ("ls_perf003_save_loop", "PERF-003"),
-            ("ls_perf004_getnth_loop", "PERF-004"),
+            "ls_perf001_no_autoupdate",
+            "ls_perf002_getview_loop",
+            "ls_perf003_save_loop",
+            "ls_perf004_getnth_loop",
         ],
     )
-    def test_positive(self, ls_cases_by_id: dict[str, FixtureCase], case_id: str, rule: str):
+    def test_not_emitted_on_lotusscript(self, ls_cases_by_id: dict[str, FixtureCase], case_id: str):
         hit = rule_ids(case_to_unit(ls_cases_by_id[case_id]))
-        assert rule in hit, f"{case_id}: expected {rule}, got {sorted(hit)}"
-
-    def test_autoupdate_false_suppresses_perf001(self, ls_cases_by_id: dict[str, FixtureCase]):
-        hit = rule_ids(case_to_unit(ls_cases_by_id["ls_perf001_ok"]))
-        assert "PERF-001" not in hit
-
-    def test_getnth_outside_loop_suppresses_perf004(self, ls_cases_by_id: dict[str, FixtureCase]):
-        hit = rule_ids(case_to_unit(ls_cases_by_id["ls_perf004_getnth_no_loop_ok"]))
-        assert "PERF-004" not in hit
+        assert hit == set(), f"{case_id}: unexpected {sorted(hit)}"
 
 
 class TestPerfJava:
@@ -82,4 +77,7 @@ class TestPerfViaGraphAudit:
         assert "findings" in payload
         perf = [f for f in payload["findings"] if str(f["rule_id"]).startswith("PERF-")]
         assert perf
+        assert all(
+            "lotus" not in str(f.get("language", "")).lower() for f in perf
+        )
         assert all(f.get("category", "").find("Performance") >= 0 or f["rule_id"].startswith("PERF-") for f in perf)

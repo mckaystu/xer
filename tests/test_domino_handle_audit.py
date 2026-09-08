@@ -912,7 +912,25 @@ public void nav(View view) throws NotesException {
         )
         assert "DOM-015" in rules(unit)
 
-    def test_perf001_autoupdate(self):
+    def test_perf001_autoupdate_java(self):
+        unit = java(
+            "NoAuto",
+            """
+public void walk(View view) throws NotesException {
+  Document doc = view.getFirstDocument();
+  while (doc != null) {
+    doc.replaceItemValue("X", "1");
+    doc.save(true, false);
+    Document next = view.getNextDocument(doc);
+    doc.recycle();
+    doc = next;
+  }
+}
+""",
+        )
+        assert "PERF-001" in rules(unit)
+
+    def test_perf_not_emitted_for_lotusscript(self):
         unit = ls(
             "NoAuto",
             """
@@ -927,22 +945,24 @@ Sub Initialize
 End Sub
 """,
         )
-        assert "PERF-001" in rules(unit)
+        assert "PERF-001" not in rules(unit)
+        assert rules(unit) == set()
 
     def test_perf001_ok_when_autoupdate_false(self):
-        unit = ls(
+        unit = java(
             "AutoOk",
             """
-Sub Initialize
-  view.AutoUpdate = False
-  Dim doc As NotesDocument
-  Set doc = view.GetFirstDocument()
-  Do While Not doc Is Nothing
-    Call doc.Save(True, False)
-    Set doc = view.GetNextDocument(doc)
-  Loop
-  view.AutoUpdate = True
-End Sub
+public void walk(View view) throws NotesException {
+  view.setAutoUpdate(false);
+  Document doc = view.getFirstDocument();
+  while (doc != null) {
+    doc.save(true, false);
+    Document next = view.getNextDocument(doc);
+    doc.recycle();
+    doc = next;
+  }
+  view.setAutoUpdate(true);
+}
 """,
         )
         assert "PERF-001" not in rules(unit)

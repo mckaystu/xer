@@ -107,7 +107,28 @@ class TestInventoryRingRiskClass:
 
 
 class TestSecRules:
-    def test_sec001_hardcoded_http(self):
+    def test_sec001_hardcoded_http_java(self):
+        from analytics.code_auditor.models import CodeUnit
+
+        unit = CodeUnit(
+            source_file="t.dxl",
+            element_name="Creds",
+            element_type="scriptlibrary",
+            language="java",
+            event=None,
+            body=(
+                'public void run() {\n'
+                '  String password = "s3cret!";\n'
+                '  String url = "http://mbrexp33.mbre.local/abms/bossrest.nsf";\n'
+                '  System.out.println(password + url);\n'
+                '}\n'
+            ),
+        )
+        ids = {f.rule_id for f in run_rule_engine([unit])}
+        assert "SEC-001" in ids
+        assert "SEC-001" in RULE_CATALOG
+
+    def test_sec_not_emitted_for_lotusscript(self):
         unit = ls(
             "Creds",
             """
@@ -119,22 +140,23 @@ Sub Initialize
 End Sub
 """,
         )
-        ids = {f.rule_id for f in run_rule_engine([unit])}
-        assert "SEC-001" in ids
-        assert "SEC-001" in RULE_CATALOG
+        assert run_rule_engine([unit]) == []
 
-    def test_sec002_query_unid(self):
-        unit = ls(
-            "QueryUnid",
-            """
-Sub Initialize
-  Dim unid As String
-  Dim doc As NotesDocument
-  unid = Query_String
-  Set doc = db.GetDocumentByUNID(unid)
-  Print doc.NoteID
-End Sub
-""",
+    def test_sec002_query_unid_java(self):
+        from analytics.code_auditor.models import CodeUnit
+
+        unit = CodeUnit(
+            source_file="t.dxl",
+            element_name="QueryUnid",
+            element_type="scriptlibrary",
+            language="java",
+            event=None,
+            body=(
+                "public void run(Database db) throws NotesException {\n"
+                '  String unid = request.getParameter("unid");\n'
+                "  Document doc = db.getDocumentByUNID(unid);\n"
+                "}\n"
+            ),
         )
         ids = {f.rule_id for f in run_rule_engine([unit])}
         assert "SEC-002" in ids

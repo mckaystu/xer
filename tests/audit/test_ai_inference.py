@@ -43,9 +43,9 @@ class TestLlmGating:
         monkeypatch.delenv("OPENAI_API_KEY", raising=False)
         assert llm_available() is False
 
-    def test_enrich_skips_without_key(self, monkeypatch: pytest.MonkeyPatch, ls_cases_by_id: dict[str, FixtureCase]):
+    def test_enrich_skips_without_key(self, monkeypatch: pytest.MonkeyPatch, java_cases_by_id: dict[str, FixtureCase]):
         monkeypatch.delenv("OPENAI_API_KEY", raising=False)
-        unit = case_to_unit(ls_cases_by_id["ls_dom001_leak"])
+        unit = case_to_unit(java_cases_by_id["dom002_loop_no_recycle"])
         findings = run_rule_engine([unit])
         out, notes = enrich_with_llm([unit], findings, max_units=5)
         assert out == findings
@@ -62,9 +62,9 @@ class TestLlmGating:
 
 
 class TestPass1FalsePositiveFilter:
-    def test_marks_false_positive(self, monkeypatch: pytest.MonkeyPatch, ls_cases_by_id: dict[str, FixtureCase]):
+    def test_marks_false_positive(self, monkeypatch: pytest.MonkeyPatch, java_cases_by_id: dict[str, FixtureCase]):
         monkeypatch.setenv("OPENAI_API_KEY", "sk-test-not-real")
-        unit = case_to_unit(ls_cases_by_id["ls_dom001_leak"])
+        unit = case_to_unit(java_cases_by_id["dom002_loop_no_recycle"])
         findings = run_rule_engine([unit])
         assert findings
         first_id = "F-001"
@@ -91,9 +91,9 @@ class TestPass1FalsePositiveFilter:
         assert fps[0].ai_validation_status == "FALSE_POSITIVE"
         assert any("Pass 1" in n for n in notes)
 
-    def test_verifies_real_leak(self, monkeypatch: pytest.MonkeyPatch, ls_cases_by_id: dict[str, FixtureCase]):
+    def test_verifies_real_leak(self, monkeypatch: pytest.MonkeyPatch, java_cases_by_id: dict[str, FixtureCase]):
         monkeypatch.setenv("OPENAI_API_KEY", "sk-test-not-real")
-        unit = case_to_unit(ls_cases_by_id["ls_dom001_leak"])
+        unit = case_to_unit(java_cases_by_id["dom002_loop_no_recycle"])
         findings = run_rule_engine([unit])
 
         def fake_chat(system: str, user_payload: dict, *, model: str) -> dict:
@@ -105,7 +105,7 @@ class TestPass1FalsePositiveFilter:
                             "finding_id": fid,
                             "verdict": "VERIFIED",
                             "confidence": 95,
-                            "reasoning": "No Delete in loop.",
+                            "reasoning": "No recycle in loop.",
                         }
                     ]
                 }
@@ -123,24 +123,22 @@ class TestPass2BlindSpotDetector:
         monkeypatch.setenv("OPENAI_API_KEY", "sk-test-not-real")
         # Pass 2 only runs on units with HANDLE_ALLOC_HINT and zero static hits.
         unit = CodeUnit(
-            source_file="lib.lss",
+            source_file="lib.java",
             element_name="SubtleLeak",
             element_type="scriptlibrary",
-            language="lotusscript",
+            language="java",
             event=None,
             body=(
-                "Sub Initialize\n"
-                "  Dim session As New NotesSession\n"
-                "  Dim db As NotesDatabase\n"
-                "  Set db = session.CurrentDatabase\n"
-                "  Print db.Title\n"
-                "End Sub\n"
+                "public void run(Session session) throws NotesException {\n"
+                "  Database db = session.getCurrentDatabase();\n"
+                "  System.out.println(db.getTitle());\n"
+                "}\n"
             ),
             start_line=1,
             keywords_matched=["Database", "session"],
         )
-        static = run_rule_engine([unit])
-        assert not static, f"fixture must have zero static hits for Pass 2; got { {f.rule_id for f in static} }"
+        # Pass 2 candidates are units with alloc hints and zero *existing* findings
+        findings: list[Finding] = []
 
         def fake_chat(system: str, user_payload: dict, *, model: str) -> dict:
             if "BLIND-SPOT" in system or "BLIND_SPOT" in system:
@@ -149,19 +147,19 @@ class TestPass2BlindSpotDetector:
                         {
                             "severity": "HIGH",
                             "confidence": 90,
-                            "line_hint": 4,
-                            "evidence": "Set db = session.CurrentDatabase",
-                            "technical_impact": "NotesDatabase handle not Deleted before exit.",
-                            "remediation": "Delete db before End Sub.",
-                            "action_required": "Add Delete db in cleanup path.",
-                            "reasoning": "Static rules miss session.CurrentDatabase assignment.",
+                            "line_hint": 2,
+                            "evidence": "Database db = session.getCurrentDatabase();",
+                            "technical_impact": "Database handle not recycled before exit.",
+                            "remediation": "db.recycle() in finally.",
+                            "action_required": "Add recycle in cleanup path.",
+                            "reasoning": "Static rules miss getCurrentDatabase assignment.",
                         }
                     ]
                 }
             return {"reviews": [], "ownership_gaps": [], "severity_adjustments": []}
 
         with patch("analytics.code_auditor.llm_engine._chat_json", side_effect=fake_chat):
-            out, notes = enrich_with_llm([unit], [], max_units=8)
+            out, notes = enrich_with_llm([unit], findings, max_units=8)
         bs = [f for f in out if f.rule_id == "DOM-BS-001" or f.is_blind_spot]
         assert bs, f"expected blind spot; notes={notes}"
         assert bs[0].ai_validation_status == "BLIND_SPOT"
@@ -172,41 +170,40 @@ class TestPass3CrossModuleOwnership:
     def test_emits_dom_bs_002_and_escalates(self, monkeypatch: pytest.MonkeyPatch):
         monkeypatch.setenv("OPENAI_API_KEY", "sk-test-not-real")
         callee = CodeUnit(
-            source_file="a.lss",
+            source_file="a.java",
             element_name="FetchDoc",
             element_type="scriptlibrary",
-            language="lotusscript",
+            language="java",
             event=None,
             body=(
-                "Function FetchDoc(unid As String) As NotesDocument\n"
-                "  Dim doc As NotesDocument\n"
-                "  Set doc = db.GetDocumentByUNID(unid)\n"
-                "  Set FetchDoc = doc\n"
-                "End Function\n"
+                "public Document FetchDoc(Database db, String unid) throws NotesException {\n"
+                "  return db.getDocumentByUNID(unid);\n"
+                "}\n"
             ),
             keywords_matched=["Document"],
         )
         caller = CodeUnit(
-            source_file="b.lss",
+            source_file="b.java",
             element_name="Initialize",
             element_type="agent",
-            language="lotusscript",
+            language="java",
             event="Initialize",
             body=(
-                "Sub Initialize\n"
-                "  Dim doc As NotesDocument\n"
-                "  Set doc = FetchDoc(unid$)\n"
-                "  Print doc.NoteID\n"
-                "End Sub\n"
+                "public void Initialize(Database db) throws NotesException {\n"
+                '  Document doc = FetchDoc(db, "001");\n'
+                "  System.out.println(doc.getNoteID());\n"
+                "}\n"
             ),
             keywords_matched=["Document"],
         )
         existing = [
             _finding_stub(
                 id="F-001",
-                rule_id="LS-DOM-002",
+                rule_id="DOM-002",
                 element_name="Initialize",
+                language="java",
                 severity="MEDIUM",
+                category="C-API Handle Leaks & Object Recycling",
             )
         ]
 
@@ -243,11 +240,9 @@ class TestPass3CrossModuleOwnership:
         assert "DOM-BS-002" in RULE_CATALOG
         ownership = [f for f in out if f.rule_id == "DOM-BS-002"]
         assert ownership, f"expected DOM-BS-002; notes={notes}"
-        escalated = next(f for f in out if f.id == "F-001" or f.rule_id == "LS-DOM-002")
-        # After re-id, find the LS-DOM-002 finding
-        ls = [f for f in out if f.rule_id == "LS-DOM-002"]
-        assert ls
-        assert ls[0].severity == "CRITICAL"
+        escalated = [f for f in out if f.rule_id == "DOM-002"]
+        assert escalated
+        assert escalated[0].severity == "CRITICAL"
         assert any("Pass 3" in n for n in notes)
 
 
