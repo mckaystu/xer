@@ -20,7 +20,7 @@ Xer audits HCL Domino application code extracted from DXL / On-Disk Projects (an
 |--------|------|
 | CLI auditor | `domino_dxl_auditor.py` |
 | Language-scoped upgrade scan | `upgrade_scan.py` |
-| API | `GET /api/graphs/{id}/code-audit` (cached by default; `?refresh=true` / `?llm=true` recompute), `…/function-inventory`, `…/code-audit.docx` |
+| API | `GET /api/graphs/{id}/code-audit` (cached by default; AI auto-runs on compute when `OPENAI_API_KEY` set; `?refresh=true` / `?llm=false`) |
 | UI | Code Analysis tab — **Download Word checklist** (condensed analysis + priority function list), **Refresh analysis** |
 | Engine package | `analytics/code_auditor/` |
 
@@ -161,6 +161,8 @@ Formula units are extracted from DXL/graph for a **separate** quality track (not
 ## AI discrepancy audit (`--llm`)
 
 Requires `OPENAI_API_KEY` (optional `XER_AUDIT_MODEL`). Implemented in `llm_engine.py`.
+
+AI runs **automatically** whenever Code Analysis is computed (DXL upload, cache miss, or **Refresh analysis**), not as a separate button. Cached reloads stay fast.
 
 | Pass | Role |
 |------|------|

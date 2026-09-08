@@ -139,24 +139,22 @@ def api_graph_analysis(graph_id: str, refresh: bool = Query(False)) -> dict[str,
 @app.get("/api/graphs/{graph_id}/code-audit")
 def api_graph_code_audit(
     graph_id: str,
-    llm: bool = Query(
-        False,
-        description="Run AI discrepancy audit (false-positive filter + blind-spot detector) when OPENAI_API_KEY is set",
+    llm: bool | None = Query(
+        None,
+        description="AI discrepancy audit: omit to auto-enable when OPENAI_API_KEY is set; true/false to force",
     ),
     refresh: bool = Query(
         False,
         description="Force re-analyze even when a cached Code Analysis result exists",
     ),
 ) -> dict[str, Any]:
-    """Static Domino handle/memory anti-pattern audit for code stored in the graph.
+    """Domino handle/memory audit for code stored in the graph.
 
-    By default returns a Neon-cached result when available (fast reload). Use
-    ``refresh=true`` or ``llm=true`` to recompute.
-
-    When ``llm=true``, also returns AI verification metadata on each finding:
-    ``ai_validation_status``, ``ai_validation_reasoning``, ``is_blind_spot``,
-    ``is_false_positive``, plus report-level ``ai_discrepancy_summary``.
+    Serves Neon cache when present (fast reload). When analysis is computed
+    (cache miss, refresh, or rules-only cache with API key), AI discrepancy
+    audit runs automatically if ``OPENAI_API_KEY`` is configured.
     """
+    from analytics.code_auditor.llm_engine import llm_available
     from neon_db import (
         cached_code_audit_from_row,
         ensure_audit_snapshot,
@@ -170,16 +168,20 @@ def api_graph_code_audit(
     if not row:
         raise HTTPException(status_code=404, detail="Graph not found")
 
-    if not llm and not refresh:
+    use_llm = llm_available() if llm is None else bool(llm)
+
+    if not refresh:
         cached = cached_code_audit_from_row(row)
         if cached:
-            return cached
+            # Keep fast path; auto-upgrade rules-only cache once AI is configured
+            if llm is False or cached.get("llm_enabled") or not use_llm:
+                return cached
 
     try:
         result = ensure_audit_snapshot(
             graph_id,
             force=True,
-            use_llm=llm,
+            use_llm=use_llm,
             include_findings=True,
         )
     except Exception as exc:  # noqa: BLE001
@@ -202,11 +204,17 @@ def api_graph_function_inventory(
         False,
         description="Force re-inventory even when a cached result exists",
     ),
+    llm: bool | None = Query(
+        None,
+        description="AI inventory FP review: omit to auto-enable when OPENAI_API_KEY is set",
+    ),
 ) -> dict[str, Any]:
-    """Function inventory + recycle coverage rate for code stored in the graph.
+    """Function inventory + recycle coverage for code stored in the graph.
 
-    Serves Neon cache when present; ``refresh=true`` recomputes and updates the cache.
+    Serves Neon cache when present; recomputes (with AI when configured) on
+    refresh, cache miss, or rules-only upgrade.
     """
+    from analytics.code_auditor.llm_engine import llm_available
     from neon_db import (
         cached_function_inventory_from_row,
         ensure_audit_snapshot,
@@ -220,13 +228,18 @@ def api_graph_function_inventory(
     if not row:
         raise HTTPException(status_code=404, detail="Graph not found")
 
+    use_llm = llm_available() if llm is None else bool(llm)
+
     if not refresh:
         cached = cached_function_inventory_from_row(row)
         if cached:
-            return cached
+            if llm is False or cached.get("llm_enabled") or not use_llm:
+                return cached
 
     try:
-        result = ensure_audit_snapshot(graph_id, force=True, include_findings=True)
+        result = ensure_audit_snapshot(
+            graph_id, force=True, use_llm=use_llm, include_findings=True
+        )
     except Exception as exc:  # noqa: BLE001
         raise HTTPException(status_code=422, detail=f"Function inventory failed: {exc}") from exc
 
@@ -243,9 +256,9 @@ def api_graph_function_inventory(
 @app.get("/api/graphs/{graph_id}/code-audit.docx")
 def api_graph_code_audit_docx(
     graph_id: str,
-    llm: bool = Query(
-        False,
-        description="Include AI discrepancy metadata when OPENAI_API_KEY is set (same as code-audit)",
+    llm: bool | None = Query(
+        None,
+        description="AI discrepancy: omit to auto-enable when OPENAI_API_KEY is set",
     ),
     refresh: bool = Query(
         False,
@@ -254,6 +267,7 @@ def api_graph_code_audit_docx(
 ) -> Response:
     """Download a Word checklist of Code Analysis findings for developer remediation."""
     from analytics.code_auditor.docx_export import build_code_audit_checklist_docx, slug_filename
+    from analytics.code_auditor.llm_engine import llm_available
     from analytics.code_auditor.models import AuditReport, Finding
     from neon_db import (
         cached_code_audit_from_row,
@@ -269,12 +283,19 @@ def api_graph_code_audit_docx(
     if not row:
         raise HTTPException(status_code=404, detail="Graph not found")
 
-    if llm or refresh or not cached_code_audit_from_row(row):
+    use_llm = llm_available() if llm is None else bool(llm)
+    cached_audit = cached_code_audit_from_row(row)
+    need_compute = (
+        refresh
+        or not cached_audit
+        or (use_llm and not cached_audit.get("llm_enabled") and llm is not False)
+    )
+    if need_compute:
         try:
             ensure_audit_snapshot(
                 graph_id,
                 force=True,
-                use_llm=llm,
+                use_llm=use_llm,
                 include_findings=True,
             )
             row = get_graph(graph_id) or row
@@ -357,10 +378,13 @@ def api_graph_audit_snapshot(
     refresh: bool = Query(False, description="Force recompute and persist snapshot"),
 ) -> dict[str, Any]:
     """Persisted handle-safety / finding trend snapshot for a graph."""
+    from analytics.code_auditor.llm_engine import llm_available
     from neon_db import ensure_audit_snapshot
 
     try:
-        payload = ensure_audit_snapshot(graph_id, force=refresh)
+        payload = ensure_audit_snapshot(
+            graph_id, force=refresh, use_llm=llm_available() if refresh else False
+        )
     except (ValueError, ConnectionError, RuntimeError) as exc:
         raise HTTPException(status_code=503, detail=str(exc)) from exc
     if not payload:
@@ -526,7 +550,7 @@ async def api_upload_dxl(file: UploadFile = File(...)) -> dict[str, Any]:
     try:
         from neon_db import ensure_audit_snapshot
 
-        audit_snap = ensure_audit_snapshot(graph_id, force=True) or {}
+        audit_snap = ensure_audit_snapshot(graph_id, force=True, use_llm=True) or {}
     except Exception:  # noqa: BLE001
         audit_snap = {}
     return {

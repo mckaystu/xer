@@ -1033,7 +1033,7 @@ function renderFunctionInventoryCard(inventory) {
         </div>
         ${allocatorCleanupWarning}
         ${rateExplainer}
-        <p class="score-hint coverage-hint">Click a table row for As-Is / To-Be deep-dive. Use <strong>Run AI Discrepancy Audit</strong> to review inventory false positives, or mark FP on a row. Human marks persist across refreshes.</p>
+        <p class="score-hint coverage-hint">Click a table row for As-Is / To-Be deep-dive. AI false-positive review runs with Code Analysis when an API key is configured; you can also mark FP on a row (persists across refreshes).</p>
         ${
           rows
             ? `<table class="overview-table inventory-table"><thead><tr><th>ID</th><th>Function</th><th>Design element</th><th>Lang</th><th>Allocates</th><th>Recycles</th><th>Status</th><th>LOC</th></tr></thead><tbody>${rows}</tbody></table>`
@@ -1390,13 +1390,10 @@ function renderCodeAuditCard(audit) {
             ${filterBtn("blind_spot", "AI Blind Spots", blindCount)}
           </div>
           <div class="ai-actions">
-            <button type="button" class="ai-run-btn" id="runAiValidationBtn" ${
-              audit.llm_enabled ? "disabled" : ""
-            }>${audit.llm_enabled ? "AI Validation Complete" : "Run AI Discrepancy Audit"}</button>
             <span class="score-hint" id="aiValidationStatus">${
               audit.llm_enabled
-                ? `Verified ${verifiedCount} · FP ${fpCount} · Blind spots ${blindCount}`
-                : "Reviews findings + inventory for false positives, blind spots, and ownership (requires API key)."
+                ? `AI audit included · Verified ${verifiedCount} · FP ${fpCount} · Blind spots ${blindCount}`
+                : "AI audit runs automatically with Code Analysis when OPENAI_API_KEY is configured (first compute / refresh). Use Refresh analysis to re-run."
             }</span>
           </div>
         </div>
@@ -1556,7 +1553,6 @@ function renderCodeAnalysis() {
   wireInventoryDeepDive();
   wireCodeAuditDeepDive();
   wireAuditFindingFilters();
-  wireAiValidationButton();
   wireExportChecklistButton();
   wireRefreshAnalysisButton();
   if (pendingDeepDive) {
@@ -1916,10 +1912,12 @@ async function loadSummary(graphId, opts = {}) {
   const refreshAnalysis = !!opts.refreshAnalysis;
   try {
     overviewContent.innerHTML = `<p class="placeholder">${
-      refreshAnalysis ? "Re-running code analysis…" : "Loading application analysis…"
+      refreshAnalysis
+        ? "Re-running code analysis (rules + AI when configured)…"
+        : "Loading application analysis…"
     }</p>`;
     if (refreshAnalysis && codeAnalysisContent && activeView === "code") {
-      codeAnalysisContent.innerHTML = `<div class="overview-header"><h2>Code Analysis</h2></div><p class="placeholder">Re-running analyzer and updating saved results…</p>`;
+      codeAnalysisContent.innerHTML = `<div class="overview-header"><h2>Code Analysis</h2></div><p class="placeholder">Re-running analyzer and AI validation, then saving results…</p>`;
     }
     const [summary, analysis, trendPayload] = await Promise.all([
       fetchJson(`/api/graphs/${graphId}/summary`),
