@@ -1086,6 +1086,13 @@ th { color: var(--muted); font-weight: 500; }
   gap: 10px;
   margin-top: 10px;
 }
+.export-docx-btn {
+  display: inline-flex;
+  align-items: center;
+  text-decoration: none;
+  box-sizing: border-box;
+}
+
 .ai-run-btn {
   border: 1px solid rgba(91, 159, 212, 0.55);
   background: rgba(91, 159, 212, 0.12);

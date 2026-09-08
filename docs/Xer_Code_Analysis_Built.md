@@ -20,8 +20,8 @@ Xer audits HCL Domino application code extracted from DXL / On-Disk Projects (an
 |--------|------|
 | CLI auditor | `domino_dxl_auditor.py` |
 | Language-scoped upgrade scan | `upgrade_scan.py` |
-| API | `GET /api/graphs/{id}/code-audit`, `…/function-inventory` |
-| UI | Code Analysis tab (`web/app.js`) |
+| API | `GET /api/graphs/{id}/code-audit`, `…/function-inventory`, `…/code-audit.docx` (Word checklist) |
+| UI | Code Analysis tab (`web/app.js`) — **Export Word Checklist** |
 | Engine package | `analytics/code_auditor/` |
 
 ---
@@ -259,6 +259,7 @@ xer/
 │   ├── perf_rules.py       # PERF-*
 │   ├── sec_rules.py        # SEC-*
 │   ├── function_inventory.py
+│   ├── docx_export.py      # Word developer checklist (.docx)
 │   ├── llm_engine.py       # Pass 1–3
 │   ├── snippets.py         # As-Is / To-Be templates
 │   ├── models.py           # RULE_CATALOG, Finding, AuditReport

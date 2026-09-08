@@ -10,7 +10,7 @@ from typing import Any
 from dotenv import load_dotenv
 from fastapi import FastAPI, File, HTTPException, Query, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, Response
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
@@ -199,6 +199,63 @@ def api_graph_function_inventory(graph_id: str) -> dict[str, Any]:
         )
     except Exception as exc:  # noqa: BLE001
         raise HTTPException(status_code=422, detail=f"Function inventory failed: {exc}") from exc
+
+
+@app.get("/api/graphs/{graph_id}/code-audit.docx")
+def api_graph_code_audit_docx(
+    graph_id: str,
+    llm: bool = Query(
+        False,
+        description="Include AI discrepancy metadata when OPENAI_API_KEY is set (same as code-audit)",
+    ),
+) -> Response:
+    """Download a Word checklist of Code Analysis findings for developer remediation."""
+    from analytics.code_auditor import run_audit, run_function_inventory
+    from analytics.code_auditor.docx_export import build_code_audit_checklist_docx, slug_filename
+    from neon_db import get_graph
+
+    try:
+        row = get_graph(graph_id)
+    except (ValueError, ConnectionError) as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    if not row:
+        raise HTTPException(status_code=404, detail="Graph not found")
+
+    try:
+        report = run_audit(
+            row.get("nsf_path") or graph_id,
+            graph=row["graph"],
+            use_llm=llm,
+            out_dir=None,
+        )
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(status_code=422, detail=f"Code audit failed: {exc}") from exc
+
+    inventory: dict[str, Any] | None = None
+    try:
+        inventory = run_function_inventory(
+            row.get("nsf_path") or graph_id,
+            graph=row["graph"],
+        )
+    except Exception:  # noqa: BLE001
+        inventory = None
+
+    try:
+        payload = build_code_audit_checklist_docx(
+            report,
+            database_title=row.get("database_title"),
+            nsf_path=row.get("nsf_path"),
+            inventory=inventory,
+        )
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(status_code=500, detail=f"DOCX export failed: {exc}") from exc
+
+    filename = slug_filename(row.get("database_title") or row.get("nsf_path") or graph_id)
+    return Response(
+        content=payload,
+        media_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
 
 
 @app.get("/api/graphs/{graph_id}/audit-snapshot")

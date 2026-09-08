@@ -1291,6 +1291,11 @@ function renderCodeAuditCard(audit) {
             <button type="button" class="ai-run-btn" id="runAiValidationBtn" ${
               audit.llm_enabled ? "disabled" : ""
             }>${audit.llm_enabled ? "AI Validation Complete" : "Run AI Discrepancy Audit"}</button>
+            <a class="ai-run-btn export-docx-btn" id="exportChecklistBtn" href="/api/graphs/${encodeURIComponent(
+              graphSelect.value
+            )}/code-audit.docx" download>
+              Export Word Checklist
+            </a>
             <span class="score-hint" id="aiValidationStatus">${
               audit.llm_enabled
                 ? `Verified ${verifiedCount} · FP ${fpCount} · Blind spots ${blindCount}`
@@ -1412,6 +1417,7 @@ function renderCodeAnalysis() {
   wireCodeAuditDeepDive();
   wireAuditFindingFilters();
   wireAiValidationButton();
+  wireExportChecklistButton();
   if (pendingDeepDive) {
     const pending = pendingDeepDive;
     pendingDeepDive = null;
@@ -1543,6 +1549,17 @@ function wireAuditFindingFilters() {
       auditFindingFilter = btn.dataset.findingsFilter || "all";
       renderCodeAnalysis();
     });
+  });
+}
+
+function wireExportChecklistButton() {
+  const link = document.getElementById("exportChecklistBtn");
+  if (!link) return;
+  link.addEventListener("click", () => {
+    const graphId = graphSelect.value;
+    if (!graphId) return;
+    const llm = !!(currentCodeAudit && currentCodeAudit.llm_enabled);
+    link.href = `/api/graphs/${encodeURIComponent(graphId)}/code-audit.docx${llm ? "?llm=true" : ""}`;
   });
 }
 
