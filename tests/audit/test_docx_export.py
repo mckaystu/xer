@@ -1,4 +1,4 @@
-"""Tests for Word checklist export of Code Analysis findings."""
+"""Tests for Word priority checklist export."""
 
 from __future__ import annotations
 
@@ -34,11 +34,11 @@ def _finding(**kwargs) -> Finding:
 
 
 def test_slug_filename():
-    assert slug_filename("xBoss REST Services").endswith("_handle_checklist.docx")
+    assert slug_filename("xBoss REST Services").endswith("_priority_checklist.docx")
     assert " " not in slug_filename("xBoss REST Services")
 
 
-def test_build_checklist_docx_contains_finding_text():
+def test_build_checklist_docx_priority_functions():
     report = AuditReport(
         source="test.nsf",
         files_scanned=1,
@@ -54,7 +54,6 @@ def test_build_checklist_docx_contains_finding_text():
                 language="javascript",
                 element_name="uploadFile",
             ),
-            # LotusScript should be excluded from checklist
             _finding(
                 id="F-LS",
                 rule_id="DOM-001",
@@ -67,16 +66,53 @@ def test_build_checklist_docx_contains_finding_text():
     inventory = {
         "summary": {
             "handle_safety_rate": 79.2,
-            "unprotected_functions": 1,
+            "recycle_coverage_rate": 0,
+            "unprotected_functions": 2,
             "total_functions_scanned": 10,
+            "functions_partial_cleanup": 1,
+            "functions_conditional_cleanup": 0,
+            "functions_escape_path_gap": 0,
         },
         "inventory": [
+            {
+                "function_name": "safeHelper",
+                "design_element": "Utils",
+                "language": "java",
+                "status": "SAFE_NO_HANDLES",
+                "risk_severity": "LOW",
+            },
+            {
+                "function_name": "mediumPartial",
+                "design_element": "Lib",
+                "language": "java",
+                "status": "PARTIAL_CLEANUP",
+                "risk_severity": "MEDIUM",
+                "in_loop": False,
+                "allocates_handles": True,
+                "recycle_call_count": 1,
+            },
             {
                 "function_name": "uploadFile",
                 "design_element": "ssjs",
                 "language": "javascript",
                 "status": "UNPROTECTED_ALLOCATION",
-            }
+                "risk_severity": "CRITICAL",
+                "in_loop": True,
+                "allocates_handles": True,
+                "recycle_call_count": 0,
+                "problem_breakdown": "Allocates in loop without recycle",
+                "remediation_guide": "recycle in finally",
+            },
+            {
+                "function_name": "exportUnprocessed",
+                "design_element": "Boss",
+                "language": "java",
+                "status": "UNPROTECTED_ALLOCATION",
+                "risk_severity": "HIGH",
+                "in_loop": False,
+                "allocates_handles": True,
+                "recycle_call_count": 0,
+            },
         ],
     }
     data = build_code_audit_checklist_docx(
@@ -85,14 +121,15 @@ def test_build_checklist_docx_contains_finding_text():
         nsf_path="bossrest.nsf",
         inventory=inventory,
     )
-    assert data[:2] == b"PK"  # zip/docx magic
-    assert len(data) > 2000
-
+    assert data[:2] == b"PK"
     with zipfile.ZipFile(io.BytesIO(data)) as zf:
         xml = zf.read("word/document.xml").decode("utf-8")
-    assert "Handle Exhaustion" in xml
-    assert "exportUnprocessed" in xml or "Session not recycled" in xml
-    assert "Document leak in loop" in xml
-    assert "LS ignored" not in xml
+    assert "Priority Checklist" in xml or "Condensed analysis" in xml
     assert "uploadFile" in xml
-    assert "Developer Checklist" in xml or "Working checklist" in xml
+    assert "exportUnprocessed" in xml
+    assert "mediumPartial" in xml
+    assert "safeHelper" not in xml  # not actionable
+    assert "LS ignored" not in xml
+    # Priority order: CRITICAL uploadFile before HIGH exportUnprocessed
+    assert xml.index("uploadFile") < xml.index("exportUnprocessed")
+    assert "Document leak in loop" in xml

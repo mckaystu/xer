@@ -1291,11 +1291,6 @@ function renderCodeAuditCard(audit) {
             <button type="button" class="ai-run-btn" id="runAiValidationBtn" ${
               audit.llm_enabled ? "disabled" : ""
             }>${audit.llm_enabled ? "AI Validation Complete" : "Run AI Discrepancy Audit"}</button>
-            <a class="ai-run-btn export-docx-btn" id="exportChecklistBtn" href="/api/graphs/${encodeURIComponent(
-              graphSelect.value
-            )}/code-audit.docx" download>
-              Export Word Checklist
-            </a>
             <span class="score-hint" id="aiValidationStatus">${
               audit.llm_enabled
                 ? `Verified ${verifiedCount} · FP ${fpCount} · Blind spots ${blindCount}`
@@ -1422,10 +1417,20 @@ function renderCodeAnalysisCacheBar() {
     : at
       ? `Analysis saved${at ? ` · ${formatCachedAt(at)}` : ""} for faster reloads.`
       : "First open runs the analyzer; the result is saved for faster reloads.";
+  const graphId = graphSelect.value || "";
+  const llm = !!(currentCodeAudit && currentCodeAudit.llm_enabled);
+  const docxHref = graphId
+    ? `/api/graphs/${encodeURIComponent(graphId)}/code-audit.docx${llm ? "?llm=true" : ""}`
+    : "#";
   return `
     <div class="code-cache-bar" role="status">
       <span class="score-hint">${escapeHtml(status)}</span>
-      <button type="button" class="ai-run-btn" id="refreshAnalysisBtn">Refresh analysis</button>
+      <div class="code-cache-actions">
+        <a class="ai-run-btn export-docx-btn" id="exportChecklistBtn" href="${docxHref}" download>
+          Download Word checklist
+        </a>
+        <button type="button" class="ai-run-btn" id="refreshAnalysisBtn">Refresh analysis</button>
+      </div>
     </div>
   `;
 }
