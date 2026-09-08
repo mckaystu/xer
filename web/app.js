@@ -199,14 +199,11 @@ function computeNodeIssues() {
   const findings = currentCodeAudit?.findings || [];
   findings.forEach((finding, idx) => {
     if (finding.is_false_positive) return;
+    const lang = String(finding.language || "").toLowerCase();
+    if (lang.includes("lotus") || lang === "ls" || lang === "lss" || lang === "notes") return;
     // Handle Exhaustion badges: Java / SSJS / XPages C-API recycle only
     if (findingCategoryBucket(finding) !== "handle" && findingCategoryBucket(finding) !== "ownership") {
-      if (findingCategoryBucket(finding) === "ai") {
-        const lang = String(finding.language || "").toLowerCase();
-        if (lang.includes("lotus") || lang === "ls" || lang === "lss") return;
-      } else {
-        return;
-      }
+      if (findingCategoryBucket(finding) !== "ai") return;
     }
     const et = finding.element_type || "";
     const en = finding.element_name || "";
@@ -1135,6 +1132,8 @@ function findingFilterBucket(f) {
 function findingCategoryBucket(f) {
   const rid = String(f.rule_id || "");
   const cat = String(f.category || "");
+  const lang = String(f.language || "").toLowerCase();
+  const isLotus = lang.includes("lotus") || lang === "ls" || lang === "lss" || lang === "notes";
   if (rid.startsWith("PERF-") || cat.includes("Performance") || cat.includes("NIF")) {
     return "performance";
   }
@@ -1144,8 +1143,8 @@ function findingCategoryBucket(f) {
   if (rid.startsWith("SEC-") || cat.includes("Security")) {
     return "security";
   }
-  // LS-DOM-* is not emitted by the auditor (LotusScript ≠ C-API handle exhaustion)
-  if (rid.startsWith("LS-DOM")) {
+  // LotusScript is out of scope for C-API Handle Exhaustion (DOM-*)
+  if (isLotus || rid.startsWith("LS-DOM")) {
     return "other";
   }
   if (rid.startsWith("DOM-OWN") || cat.includes("Handle Ownership")) {

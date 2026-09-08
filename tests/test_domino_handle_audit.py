@@ -243,7 +243,7 @@ Dim localDb As NotesDatabase
         )
         assert "LS-DOM-003" not in rules(unit)
 
-    def test_static_notes_document_fires_dom006(self):
+    def test_static_notes_document_does_not_fire_dom006_on_lotusscript(self):
         unit = ls(
             "StaticHandle",
             """
@@ -253,7 +253,30 @@ End Sub
 """,
             element_type="scriptlibrary",
         )
-        assert "DOM-006" in rules(unit)
+        assert "DOM-006" not in rules(unit)
+        assert not any(r.startswith("DOM-") for r in rules(unit))
+
+    def test_ls_conditional_remove_does_not_fire_dom012(self):
+        """Regression: DOM-012 previously matched LotusScript If … Remove as recycle."""
+        unit = ls(
+            "StatusToVerify",
+            """
+Sub Initialize
+  Dim dc As NotesDocumentCollection
+  Dim dtldoc As NotesDocument
+  Dim i As Integer
+  For i = 1 To dccount
+    Set dtldoc = dc.GetNthDocument(i)
+    If dtldoc.ODQty(0) = 0 Then
+      Call dtldoc.Remove(True)
+    End If
+  Next
+End Sub
+""",
+        )
+        hit = rules(unit)
+        assert "DOM-012" not in hit
+        assert not any(r.startswith("DOM-") for r in hit)
 
     def test_conditional_delete_still_counts_cleanup_today(self):
         """Conditional Delete is incomplete — inventory marks CONDITIONAL_CLEANUP.
