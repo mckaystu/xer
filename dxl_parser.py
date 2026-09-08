@@ -22,7 +22,7 @@ XER_ROOT = Path(__file__).resolve().parent
 DEFAULT_INPUT_DIR = XER_ROOT / "dxl_input"
 DEFAULT_OUTPUT_PATH = XER_ROOT / "application_graph.json"
 
-PARSER_VERSION = "1.2.0"
+PARSER_VERSION = "1.3.0"
 DXL_NS = "http://www.lotus.com/dxl"
 NS = {"dxl": DXL_NS}
 
@@ -226,6 +226,23 @@ def extract_code_blocks(container: ET.Element, context: str) -> list[CodeBlock]:
                         )
                     )
     return blocks
+
+
+def extract_server_js_code_blocks(scriptlibrary_elem: ET.Element, context: str) -> list[CodeBlock]:
+    """Decode ``$ServerJavaScriptLibrary`` payloads into a javascript CodeBlock."""
+    from dxl_ssjs import extract_server_javascript_library
+
+    body = extract_server_javascript_library(scriptlibrary_elem)
+    if not body:
+        return []
+    return [
+        CodeBlock(
+            language="javascript",
+            event="library",
+            body=body,
+            context=context,
+        )
+    ]
 
 
 def extract_string_args(arg_blob: str) -> list[str]:
@@ -649,6 +666,8 @@ def parse_script_library(elem: ET.Element, source_file: str, database_id: str) -
     name = elem_attr(elem, "name") or "Unnamed"
     alias = elem_attr(elem, "alias")
     code_events = extract_code_blocks(elem, f"scriptlibrary:{name}")
+    # SSJS libraries store source in $ServerJavaScriptLibrary rawitemdata, not <javascript>
+    code_events.extend(extract_server_js_code_blocks(elem, f"scriptlibrary:{name}"))
     return ScriptLibraryModel(
         name=name,
         alias=alias,

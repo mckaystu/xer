@@ -11,6 +11,7 @@ Xer audits HCL Domino application code extracted from DXL / On-Disk Projects (an
 - Basic application security issues
 - Function-level recycle coverage inventory
 - Optional AI discrepancy review (`--llm`)
+- Domino **SSJS script libraries** stored as `$ServerJavaScriptLibrary` (decoded from DXL rawitemdata)
 
 **Entry points**
 

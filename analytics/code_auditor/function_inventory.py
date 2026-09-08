@@ -62,6 +62,13 @@ _JS_FUNCTION = re.compile(
     r"(?P<name>[A-Za-z_$][\w$]*)\s*\((?P<params>[^)]*)\)\s*\{",
 )
 
+# Object / namespace methods common in Domino SSJS libraries:
+#   exportUnprocessed : function() { ... }
+_JS_OBJECT_METHOD = re.compile(
+    r"(?m)^(?P<indent>[ \t]*)(?P<name>[A-Za-z_$][\w$]*)\s*:\s*"
+    r"(?:async\s+)?function\s*\((?P<params>[^)]*)\)\s*\{",
+)
+
 # Java / typed methods: modifiers returnType name(...) {
 _JAVA_METHOD = re.compile(
     r"(?m)^(?P<indent>[ \t]*)(?P<mods>(?:public|private|protected|static|final|synchronized|native|abstract|\s)+)"
@@ -230,17 +237,18 @@ def _extract_brace_functions(unit: CodeUnit) -> list[tuple[str, str, int, str]]:
     def overlaps(start: int, end: int) -> bool:
         return any(not (end <= a or start >= b) for a, b in occupied)
 
-    for m in _JS_FUNCTION.finditer(body):
-        brace_at = m.end() - 1
-        inner = _match_brace_block(body, brace_at)
-        if inner is None:
-            continue
-        end = brace_at + 1 + len(inner) + 1
-        if overlaps(m.start(), end):
-            continue
-        occupied.append((m.start(), end))
-        start_line = unit.start_line + body.count("\n", 0, m.start())
-        results.append((m.group("name"), inner, start_line, body[m.start() : end]))
+    for pattern in (_JS_FUNCTION, _JS_OBJECT_METHOD):
+        for m in pattern.finditer(body):
+            brace_at = m.end() - 1
+            inner = _match_brace_block(body, brace_at)
+            if inner is None:
+                continue
+            end = brace_at + 1 + len(inner) + 1
+            if overlaps(m.start(), end):
+                continue
+            occupied.append((m.start(), end))
+            start_line = unit.start_line + body.count("\n", 0, m.start())
+            results.append((m.group("name"), inner, start_line, body[m.start() : end]))
 
     lang = (unit.language or "").lower()
     if "java" in lang or "xpage" in lang or lang in {"source", "script"}:
