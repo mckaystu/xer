@@ -83,6 +83,8 @@ ALLOC_METHODS: tuple[str, ...] = (
     "getNextEntry",
     "GetAllDocumentsByKey",
     "getAllDocumentsByKey",
+    "GetDocumentByKey",
+    "getDocumentByKey",
     "CreateDocument",
     "createDocument",
     "GetView",
@@ -151,6 +153,49 @@ RE_IF_BLOCK_HINT = re.compile(r"(?is)\bIf\b.{0,200}?\b(?:Delete\s+\w+|\w+\s*\.\s
 RE_JAVA_IF_RECYCLE = re.compile(
     r"(?is)\bif\s*\([^)]*\)\s*\{[^}]{0,240}?\.\s*recycle\s*\("
 )
+RE_LS_ESCAPE = re.compile(
+    r"(?im)^[ \t]*(?:Exit\s+Sub|Exit\s+Function|GoTo\s+\w+|Resume\s+(?:Next|\w+))\b"
+)
+RE_JAVA_EARLY_RETURN = re.compile(r"(?m)^[ \t]*return\b")
+
+
+@dataclass
+class CleanupAnalysis:
+    allocates: bool
+    allocated_vars: list[str]
+    cleaned_vars: list[str]
+    unclean_vars: list[str]
+    recycle_call_count: int
+    cleanup_conditional: bool
+    has_finally: bool
+    status: str  # FunctionStatus string
+    escape_path_gap: bool = False
+
+
+def has_escape_path_gap(body: str, language: str = "") -> bool:
+    """True when an early exit occurs after allocation but before any cleanup in that prefix."""
+    text = body or ""
+    if is_lotusscript(language):
+        for m in RE_LS_ESCAPE.finditer(text):
+            prefix = text[: m.start()]
+            if not (find_allocated_vars(prefix, language) or body_allocates(prefix, language)):
+                continue
+            if count_cleanup_statements(prefix, language) == 0:
+                return True
+        return False
+    if RE_FINALLY.search(text):
+        return False
+    for m in RE_JAVA_EARLY_RETURN.finditer(text):
+        prefix = text[: m.start()]
+        if body_allocates(prefix, language) and count_cleanup_statements(prefix, language) == 0:
+            return True
+    return False
+
+
+def is_lotusscript(lang: str) -> bool:
+    low = (lang or "").lower()
+    return "lotus" in low or low in {"ls", "lss", "notes"}
+
 
 # Broad presence patterns (fallback when vars can't be named)
 LS_ALLOCATION_PATTERNS: list[re.Pattern[str]] = [
@@ -164,23 +209,6 @@ ALLOCATION_PATTERNS: list[re.Pattern[str]] = [
     # Typed lotus handles — avoid bare \bDocument\b / \bView\b (too noisy)
     re.compile(r"\b(?:NotesDocument|NotesView|NotesDatabase|DocumentCollection|ViewEntryCollection|ViewNavigator|MIMEEntity|RichTextItem)\b"),
 ]
-
-
-@dataclass
-class CleanupAnalysis:
-    allocates: bool
-    allocated_vars: list[str]
-    cleaned_vars: list[str]
-    unclean_vars: list[str]
-    recycle_call_count: int
-    cleanup_conditional: bool
-    has_finally: bool
-    status: str  # FunctionStatus string
-
-
-def is_lotusscript(lang: str) -> bool:
-    low = (lang or "").lower()
-    return "lotus" in low or low in {"ls", "lss", "notes"}
 
 
 def body_allocates(body: str, language: str = "") -> bool:
@@ -357,6 +385,7 @@ def analyze_handle_cleanup(body: str, language: str = "") -> CleanupAnalysis:
             cleanup_conditional=False,
             has_finally=has_finally,
             status="SAFE_NO_HANDLES",
+            escape_path_gap=False,
         )
 
     unclean_set = set(allocated) - set(cleaned) if allocated else set()
@@ -382,15 +411,23 @@ def analyze_handle_cleanup(body: str, language: str = "") -> CleanupAnalysis:
         else:
             status = "PROTECTED"
 
+    escape_gap = has_escape_path_gap(text, language)
+    # Escape without cleanup on that path — worse than "protected" even if Delete appears later
+    if escape_gap and status in {"PROTECTED", "CONDITIONAL_CLEANUP"}:
+        status = "ESCAPE_PATH_GAP"
+    elif escape_gap and status == "PARTIAL_CLEANUP":
+        status = "ESCAPE_PATH_GAP"
+
     return CleanupAnalysis(
         allocates=True,
         allocated_vars=allocated,
         cleaned_vars=cleaned,
         unclean_vars=unclean,
         recycle_call_count=recycle_count,
-        cleanup_conditional=conditional,
+        cleanup_conditional=conditional or escape_gap,
         has_finally=has_finally,
         status=status,
+        escape_path_gap=escape_gap,
     )
 
 

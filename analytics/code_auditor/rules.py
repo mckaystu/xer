@@ -836,7 +836,12 @@ DETECTORS = [
 ]
 
 
-def run_rule_engine(units: Iterable[CodeUnit]) -> list[Finding]:
+def run_rule_engine(
+    units: Iterable[CodeUnit],
+    *,
+    graph: dict | None = None,
+    edges: list | None = None,
+) -> list[Finding]:
     from analytics.code_auditor.form_rules import FORM_DETECTORS
     from analytics.code_auditor.form_rules import bind_helpers as bind_form
     from analytics.code_auditor.ls_rules import LS_DETECTORS, bind_helpers
@@ -868,8 +873,8 @@ def run_rule_engine(units: Iterable[CodeUnit]) -> list[Finding]:
             findings.extend(detector(unit))
         for detector in FORM_DETECTORS:
             findings.extend(detector(unit))
-    # Cross-unit ownership (needs full set)
-    findings.extend(run_ownership_detectors(unit_list))
+    # Cross-unit / cross-library ownership (needs full set + optional graph edges)
+    findings.extend(run_ownership_detectors(unit_list, graph=graph, edges=edges))
     # Assign stable IDs
     for idx, finding in enumerate(findings, start=1):
         finding.id = f"F-{idx:03d}"

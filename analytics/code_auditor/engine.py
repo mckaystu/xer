@@ -54,7 +54,7 @@ def run_audit(
         filtered = apply_prefilter(units, require_keywords=False)
         notes.append("Pre-filter matched no keyword hits; fell back to language-based scan.")
 
-    findings = run_rule_engine(filtered)
+    findings = run_rule_engine(filtered, graph=graph)
 
     enable_llm = llm_available() if use_llm is None else bool(use_llm)
     if enable_llm:

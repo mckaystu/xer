@@ -1,15 +1,15 @@
 """Deterministic cross-function Domino handle ownership (DOM-OWN-001).
 
-Builds a light call graph within extracted units and flags cases where a handle is
-returned or accepted across a call boundary without Delete/.recycle() on either side.
-LLM Pass 3 (DOM-BS-002) remains for ambiguous / cross-library enrichment.
+Builds a light call graph within extracted units and, when graph edges are provided,
+restricts cross-element callees to USES_SCRIPT_LIBRARY targets (plus Use \"Lib\" in body).
+LLM Pass 3 (DOM-BS-002) remains for ambiguous enrichment.
 """
 
 from __future__ import annotations
 
 import re
 from dataclasses import dataclass
-from typing import Callable, Iterable
+from typing import Any, Callable, Iterable
 
 from analytics.code_auditor.api_catalog import (
     HANDLE_TYPES_LS,
@@ -22,6 +22,8 @@ from analytics.code_auditor.models import CodeUnit, Finding
 _finding_fn: Callable[..., Finding] | None = None
 _line_of_fn: Callable[[str, int, int], int] | None = None
 _snippet_fn: Callable[..., str] | None = None
+
+RE_USE_LIB = re.compile(r'(?im)^\s*Use\s+"([^"]+)"')
 
 
 def bind_helpers(
@@ -108,6 +110,36 @@ def _match_brace(text: str, open_idx: int) -> str:
     return text[open_idx + 1 :]
 
 
+def _norm_type(t: str) -> str:
+    low = (t or "").lower().replace("_", "")
+    if low in {"scriptlibrary", "scriptlib"}:
+        return "scriptlibrary"
+    return (t or "").lower()
+
+
+def _element_key(element_type: str, name: str) -> str:
+    return f"{_norm_type(element_type)}:{(name or '').lower()}"
+
+
+def _build_library_uses(edges: Iterable[dict[str, Any]] | None) -> dict[str, set[str]]:
+    """Map owner element_key → set of script library names (lower)."""
+    uses: dict[str, set[str]] = {}
+    for edge in edges or []:
+        if (edge.get("type") or "") != "USES_SCRIPT_LIBRARY":
+            continue
+        src = edge.get("source") or {}
+        tgt = edge.get("target") or {}
+        if _norm_type(tgt.get("element_type", "")) != "scriptlibrary":
+            continue
+        key = _element_key(src.get("element_type", ""), src.get("name", ""))
+        uses.setdefault(key, set()).add((tgt.get("name") or "").lower())
+    return uses
+
+
+def _uses_from_body(body: str) -> set[str]:
+    return {m.group(1).lower() for m in RE_USE_LIB.finditer(body or "")}
+
+
 def _extract_fns(unit: CodeUnit) -> list[FnInfo]:
     body = unit.body or ""
     out: list[FnInfo] = []
@@ -190,8 +222,47 @@ def _caller_cleans_after(call_body: str, call_end: int, language: str, result_va
     return False
 
 
-def detect_dom_own001(units: Iterable[CodeUnit]) -> list[Finding]:
-    """Static ownership gaps across call sites in the same scan set."""
+def _callee_in_scope(
+    caller: FnInfo,
+    callee: FnInfo,
+    *,
+    library_uses: dict[str, set[str]],
+    edges_provided: bool,
+) -> tuple[bool, bool]:
+    """Return (allowed, cross_library)."""
+    if caller.unit.element_name == callee.unit.element_name and (
+        _norm_type(caller.unit.element_type) == _norm_type(callee.unit.element_type)
+    ):
+        return True, False
+
+    callee_is_lib = _norm_type(callee.unit.element_type) == "scriptlibrary"
+    if not edges_provided:
+        # No graph: keep global name match (legacy), mark cross-lib when types differ
+        return True, callee.unit.element_name != caller.unit.element_name
+
+    if not callee_is_lib:
+        # Different design element that isn't a linked library — skip
+        return False, False
+
+    owner_key = _element_key(caller.unit.element_type, caller.unit.element_name)
+    libs = set(library_uses.get(owner_key) or ())
+    libs |= _uses_from_body(caller.unit.body or "")
+    lib_name = (callee.unit.element_name or "").lower()
+    if lib_name in libs:
+        return True, True
+    return False, False
+
+
+def detect_dom_own001(
+    units: Iterable[CodeUnit],
+    *,
+    edges: Iterable[dict[str, Any]] | None = None,
+) -> list[Finding]:
+    """Static ownership gaps across call sites, optionally scoped by USES_SCRIPT_LIBRARY."""
+    edge_list = list(edges) if edges is not None else None
+    library_uses = _build_library_uses(edge_list)
+    edges_provided = edge_list is not None
+
     fns: dict[str, list[FnInfo]] = {}
     all_fns: list[FnInfo] = []
     for unit in units:
@@ -228,14 +299,24 @@ def detect_dom_own001(units: Iterable[CodeUnit]) -> list[Finding]:
                 continue
             callees = fns.get(callee_name.lower()) or []
             for callee in callees:
+                allowed, cross_lib = _callee_in_scope(
+                    caller, callee, library_uses=library_uses, edges_provided=edges_provided
+                )
+                if not allowed:
+                    continue
                 if not (callee.returns_handle or callee.handle_params):
                     continue
                 callee_cleans = callee.cleans_self
                 abs_index = caller.start_offset + m.start()
-                # Prefer absolute index within unit body when possible
                 if caller.body and caller.body in unit_body:
                     abs_index = unit_body.find(caller.body) + m.start()
                 line = _line_of(unit_body, max(0, abs_index), caller.unit.start_line)
+                conf = 72 if cross_lib else 82
+                scope_note = (
+                    f" (via Use / USES_SCRIPT_LIBRARY → `{callee.unit.element_name}`)"
+                    if cross_lib
+                    else ""
+                )
 
                 if callee.handle_params and not callee.returns_handle:
                     if callee_cleans:
@@ -252,11 +333,11 @@ def detect_dom_own001(units: Iterable[CodeUnit]) -> list[Finding]:
                             caller.unit,
                             line=line,
                             evidence=_snippet(unit_body, max(0, abs_index)),
-                            confidence=78,
+                            confidence=max(70, conf - 4),
                             impact=(
                                 f"`{callee.name}` accepts handle parameter(s) "
                                 f"({', '.join(callee.handle_params)}) but neither callee nor caller "
-                                "clearly Deletes/recycles after the call."
+                                f"clearly Deletes/recycles after the call{scope_note}."
                             ),
                             remediation=(
                                 "Assign ownership: either Delete/recycle inside the callee before return, "
@@ -264,7 +345,8 @@ def detect_dom_own001(units: Iterable[CodeUnit]) -> list[Finding]:
                             ),
                             action=f"Clarify Delete/.recycle ownership for `{callee.name}` parameters.",
                             handle_lifecycle_warning=(
-                                f"Unassigned ownership: `{caller.name}` → `{callee.name}` (parameter)."
+                                f"Unassigned ownership: `{caller.name}` → `{callee.name}` (parameter)"
+                                f"{scope_note}."
                             ),
                         )
                     )
@@ -285,11 +367,12 @@ def detect_dom_own001(units: Iterable[CodeUnit]) -> list[Finding]:
                             caller.unit,
                             line=line,
                             evidence=_snippet(unit_body, max(0, abs_index)),
-                            confidence=82,
+                            confidence=conf,
                             impact=(
                                 f"`{callee.name}` returns a Domino handle and neither the callee "
                                 f"nor `{caller.name}` shows Delete/.recycle after the call"
-                                + (f" into `{result_var}`." if result_var else ".")
+                                + (f" into `{result_var}`" if result_var else "")
+                                + f"{scope_note}."
                             ),
                             remediation=(
                                 "Document ownership: recycle in callee before return, or in caller "
@@ -297,15 +380,24 @@ def detect_dom_own001(units: Iterable[CodeUnit]) -> list[Finding]:
                             ),
                             action=f"Assign Delete/.recycle ownership for return of `{callee.name}`.",
                             handle_lifecycle_warning=(
-                                f"Unassigned ownership: `{caller.name}` ← `{callee.name}` (return)."
+                                f"Unassigned ownership: `{caller.name}` ← `{callee.name}` (return)"
+                                f"{scope_note}."
                             ),
                         )
                     )
     return findings
 
 
-def run_ownership_detectors(units: Iterable[CodeUnit]) -> list[Finding]:
-    return detect_dom_own001(list(units))
+def run_ownership_detectors(
+    units: Iterable[CodeUnit],
+    *,
+    edges: Iterable[dict[str, Any]] | None = None,
+    graph: dict[str, Any] | None = None,
+) -> list[Finding]:
+    edge_list = edges
+    if edge_list is None and graph is not None:
+        edge_list = graph.get("edges") or []
+    return detect_dom_own001(list(units), edges=edge_list)
 
 
 __all__ = [

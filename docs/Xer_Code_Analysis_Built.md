@@ -132,7 +132,13 @@ Inventory deep-dives are also loop-aware: non-loop unprotected helpers show **LO
 
 ## Deterministic ownership (`DOM-OWN-001`)
 
-Static call-graph ownership lives in `ownership_rules.py`. It flags handle returns/parameters where neither caller nor callee cleans up. LLM Pass 3 (`DOM-BS-002`) still runs for residual gaps and severity escalation, and **skips elements already covered by `DOM-OWN-001`**.
+Static call-graph ownership lives in `ownership_rules.py`. It flags handle returns/parameters where neither caller nor callee cleans up.
+
+When the application graph is available, callees are scoped to the **same design element** or to **script libraries linked by `USES_SCRIPT_LIBRARY`** / `Use "Lib"` — so cross-library ownership is deterministic without LLM.
+
+LLM Pass 3 (`DOM-BS-002`) still runs for residual gaps and severity escalation, and **skips elements already covered by `DOM-OWN-001`**.
+
+Inventory also classifies **`ESCAPE_PATH_GAP`** when `Exit Sub` / `GoTo` / early `return` happens after allocation but before cleanup on that path.
 
 ---
 
@@ -152,13 +158,14 @@ Formula units are extracted from DXL/graph for a **separate** quality track (not
 
 | Surface | Path |
 |---------|------|
-| Persisted snapshot | `dxl_graphs.audit_snapshot` (+ `audit_snapshot_at`) |
-| API | `GET /api/graphs/{id}/audit-snapshot` |
+| Persisted snapshot | `dxl_graphs.audit_snapshot` (+ history[] + optional findings) |
+| API | `GET …/audit-snapshot`, `GET …/audit-trends` |
 | Upload | Recomputes snapshot after DXL store |
-| Code-audit GET | Refreshes snapshot (rules-only) |
-| CI gate | `python3 scripts/ci_audit.py <path>` + `.github/workflows/xer-auditor.yml` |
-
-Snapshot includes finding counts by severity/family and inventory rates for trend charts.
+| Code-audit GET | Refreshes snapshot; LLM runs persist findings (capped) |
+| Overview | Handle Safety Trend strip |
+| Runtime bridge | `POST …/runtime-signals` (OpenLog/DPOOL ingest stub) |
+| CI gate | `python3 scripts/ci_audit.py <path>` |
+| Catalog mining | `python3 scripts/mine_api_catalog.py application_graph.json` |
 
 ---
 

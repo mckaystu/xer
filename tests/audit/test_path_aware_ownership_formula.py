@@ -129,6 +129,81 @@ End Sub
         findings = detect_dom_own001([unit])
         assert not any(f.rule_id == "DOM-OWN-001" for f in findings)
 
+    def test_cross_library_via_uses_edge(self):
+        agent = CodeUnit(
+            source_file="a.dxl",
+            element_name="ReportAgent",
+            element_type="agent",
+            language="lotusscript",
+            event=None,
+            body="""
+Sub Initialize
+  Dim d As NotesDocument
+  Set d = LoadDoc("001")
+  Print d.NoteID
+End Sub
+""",
+        )
+        lib = CodeUnit(
+            source_file="lib.dxl",
+            element_name="OpenLogFunctions",
+            element_type="scriptlibrary",
+            language="lotusscript",
+            event=None,
+            body="""
+Function LoadDoc(uid As String) As NotesDocument
+  Dim doc As NotesDocument
+  Set doc = db.GetDocumentByUNID(uid)
+  Set LoadDoc = doc
+End Function
+""",
+        )
+        edges = [
+            {
+                "type": "USES_SCRIPT_LIBRARY",
+                "source": {"element_type": "agent", "name": "ReportAgent"},
+                "target": {"element_type": "scriptlibrary", "name": "OpenLogFunctions"},
+            }
+        ]
+        findings = detect_dom_own001([agent, lib], edges=edges)
+        assert any(f.rule_id == "DOM-OWN-001" for f in findings)
+        # Unrelated library should not match when edges are provided
+        other = CodeUnit(
+            source_file="other.dxl",
+            element_name="OtherLib",
+            element_type="scriptlibrary",
+            language="lotusscript",
+            event=None,
+            body="""
+Function LoadDoc(uid As String) As NotesDocument
+  Dim doc As NotesDocument
+  Set doc = db.GetDocumentByUNID(uid)
+  Set LoadDoc = doc
+End Function
+""",
+        )
+        findings2 = detect_dom_own001([agent, other], edges=edges)
+        assert not any(f.rule_id == "DOM-OWN-001" for f in findings2)
+
+
+class TestEscapePathGap:
+    def test_exit_before_delete(self):
+        from analytics.code_auditor.api_catalog import analyze_handle_cleanup
+
+        body = """
+Sub EarlyExit
+  Dim doc As NotesDocument
+  Set doc = db.GetDocumentByUNID(uid)
+  If doc Is Nothing Then
+    Exit Sub
+  End If
+  Delete doc
+End Sub
+"""
+        analysis = analyze_handle_cleanup(body, "lotusscript")
+        assert analysis.status == "ESCAPE_PATH_GAP"
+        assert analysis.escape_path_gap is True
+
 
 class TestFormulaRules:
     def setup_method(self):

@@ -449,8 +449,16 @@ def build_viz_payload(graph: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def build_audit_snapshot(graph: dict[str, Any], *, use_llm: bool = False) -> dict[str, Any]:
-    """Run rules-only audit + inventory and return a compact persisted snapshot."""
+def build_audit_snapshot(
+    graph: dict[str, Any],
+    *,
+    use_llm: bool = False,
+    previous: dict[str, Any] | None = None,
+    include_findings: bool | None = None,
+) -> dict[str, Any]:
+    """Run audit + inventory and return a persisted snapshot (with optional history + findings)."""
+    from datetime import datetime, timezone
+
     from analytics.code_auditor.engine import run_audit
     from analytics.code_auditor.function_inventory import run_function_inventory
 
@@ -473,8 +481,28 @@ def build_audit_snapshot(graph: dict[str, Any], *, use_llm: bool = False) -> dic
             prefix = "FORM"
         by_prefix[prefix] = by_prefix.get(prefix, 0) + 1
     summary = inventory.get("summary") or {}
+    now = datetime.now(timezone.utc).isoformat()
+    store_findings = bool(use_llm) if include_findings is None else include_findings
+    # Cap persisted findings to keep JSONB reasonable
+    findings_payload = []
+    if store_findings:
+        findings_payload = [f.to_dict() for f in findings[:200]]
+
+    point = {
+        "at": now,
+        "handle_safety_rate": summary.get("handle_safety_rate"),
+        "recycle_coverage_rate": summary.get("recycle_coverage_rate"),
+        "critical_active": by_sev.get("CRITICAL", 0),
+        "high_active": by_sev.get("HIGH", 0),
+        "findings_active": len(active),
+        "llm_enabled": bool(report.llm_enabled),
+    }
+    history = list((previous or {}).get("history") or [])
+    history.append(point)
+    history = history[-24:]
+
     return {
-        "schema_version": 1,
+        "schema_version": 2,
         "llm_enabled": bool(report.llm_enabled),
         "findings_total": len(findings),
         "findings_active": len(active),
@@ -488,9 +516,13 @@ def build_audit_snapshot(graph: dict[str, Any], *, use_llm: bool = False) -> dic
             "unprotected_functions": summary.get("unprotected_functions"),
             "functions_partial_cleanup": summary.get("functions_partial_cleanup"),
             "functions_conditional_cleanup": summary.get("functions_conditional_cleanup"),
+            "functions_escape_path_gap": summary.get("functions_escape_path_gap"),
             "total_functions_scanned": summary.get("total_functions_scanned"),
         },
         "notes": list(report.notes or [])[:8],
+        "history": history,
+        "findings": findings_payload,
+        "captured_at": now,
     }
 
 
@@ -499,6 +531,7 @@ def ensure_audit_snapshot(
     *,
     force: bool = False,
     use_llm: bool = False,
+    include_findings: bool | None = None,
 ) -> dict[str, Any] | None:
     """Compute and persist audit_snapshot on the graph row when missing or forced."""
     row = get_graph(graph_id)
@@ -512,7 +545,12 @@ def ensure_audit_snapshot(
             "audit_snapshot_at": row.get("audit_snapshot_at"),
             "cached": True,
         }
-    snapshot = build_audit_snapshot(row["graph"], use_llm=use_llm)
+    snapshot = build_audit_snapshot(
+        row["graph"],
+        use_llm=use_llm,
+        previous=existing if isinstance(existing, dict) else None,
+        include_findings=include_findings,
+    )
     conn = connect()
     try:
         init_schema(conn)
@@ -539,3 +577,87 @@ def ensure_audit_snapshot(
         "audit_snapshot_at": ts.isoformat() if ts else None,
         "cached": False,
     }
+
+
+def list_audit_trends(
+    *,
+    database_title: str | None = None,
+    nsf_path: str | None = None,
+    limit: int = 20,
+) -> list[dict[str, Any]]:
+    """Return audit snapshot points for graphs matching title/path (upload lineage)."""
+    rows = list_graphs(limit=max(limit, 50))
+    out: list[dict[str, Any]] = []
+    title_l = (database_title or "").lower()
+    path_l = (nsf_path or "").lower()
+    for row in rows:
+        if title_l and title_l not in (row.get("database_title") or "").lower():
+            continue
+        if path_l and path_l not in (row.get("nsf_path") or "").lower():
+            continue
+        snap = row.get("audit_snapshot") or {}
+        history = snap.get("history") if isinstance(snap, dict) else None
+        if history:
+            for point in history:
+                out.append(
+                    {
+                        "graph_id": row["id"],
+                        "database_title": row.get("database_title"),
+                        "parsed_at": row.get("parsed_at"),
+                        **point,
+                    }
+                )
+        elif snap:
+            out.append(
+                {
+                    "graph_id": row["id"],
+                    "database_title": row.get("database_title"),
+                    "parsed_at": row.get("parsed_at"),
+                    "at": row.get("audit_snapshot_at") or row.get("parsed_at"),
+                    "handle_safety_rate": (snap.get("inventory") or {}).get("handle_safety_rate"),
+                    "critical_active": snap.get("critical_active"),
+                    "high_active": snap.get("high_active"),
+                    "findings_active": snap.get("findings_active"),
+                    "llm_enabled": snap.get("llm_enabled"),
+                }
+            )
+    # Newest last for charting
+    out.sort(key=lambda p: p.get("at") or p.get("parsed_at") or "")
+    return out[-limit:]
+
+
+def append_runtime_signals(graph_id: str, signals: list[dict[str, Any]]) -> dict[str, Any]:
+    """Append Domino/OpenLog-style runtime handle signals onto the graph row."""
+    row = get_graph(graph_id)
+    if not row:
+        raise ValueError("Graph not found")
+    graph = dict(row["graph"] or {})
+    meta = dict(graph.get("meta") or {})
+    existing = list(meta.get("runtime_signals") or [])
+    for sig in signals:
+        existing.append(
+            {
+                "design_element": sig.get("design_element") or sig.get("element"),
+                "kind": sig.get("kind") or "handle_warning",
+                "message": sig.get("message") or "",
+                "at": sig.get("at"),
+                "severity": sig.get("severity") or "HIGH",
+            }
+        )
+    meta["runtime_signals"] = existing[-500:]
+    graph["meta"] = meta
+    conn = connect()
+    try:
+        init_schema(conn)
+        with conn.cursor() as cur:
+            cur.execute(
+                "UPDATE dxl_graphs SET graph = %s WHERE id = %s",
+                (Json(graph), UUID(graph_id)),
+            )
+        conn.commit()
+    except psycopg2.Error as exc:
+        conn.rollback()
+        raise RuntimeError(f"Failed to store runtime signals: {exc}") from exc
+    finally:
+        conn.close()
+    return {"id": graph_id, "runtime_signals": len(meta["runtime_signals"])}

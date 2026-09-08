@@ -39,6 +39,7 @@ FunctionStatus = Literal[
     "PROTECTED",
     "PARTIAL_CLEANUP",
     "CONDITIONAL_CLEANUP",
+    "ESCAPE_PATH_GAP",
     "UNPROTECTED_ALLOCATION",
 ]
 
@@ -382,6 +383,21 @@ def _inventory_guides(
             "lotusscript" if is_ls else "java",
             has_loop=in_loop,
         )
+    elif status == "ESCAPE_PATH_GAP":
+        problem = (
+            f"`{function_name}` allocates Domino handles then hits `Exit Sub` / `GoTo` / early "
+            f"`return` before {'`Delete`' if is_ls else '`.recycle()`'} runs on that path."
+        )
+        guide = (
+            "Delete/recycle before every Exit/return, or centralize cleanup in an error-handler "
+            "label / `finally` that all exits share."
+        )
+        warning = "Escape-path gap — early exit can leave C-API handles open."
+        to_be = remediation_template(
+            "LS-DOM-007" if is_ls else "DOM-010",
+            "lotusscript" if is_ls else "java",
+            has_loop=in_loop,
+        )
     elif status == "PROTECTED":
         problem = (
             f"`{function_name}` allocates Domino handles and contains explicit cleanup "
@@ -511,6 +527,7 @@ def summarize_inventory(records: list[FunctionRecord]) -> dict[str, Any]:
     fully_protected = [r for r in allocating if r.status == "PROTECTED"]
     partial = [r for r in allocating if r.status == "PARTIAL_CLEANUP"]
     conditional = [r for r in allocating if r.status == "CONDITIONAL_CLEANUP"]
+    escape_gaps = [r for r in allocating if r.status == "ESCAPE_PATH_GAP"]
     unprotected = [r for r in allocating if r.status == "UNPROTECTED_ALLOCATION"]
     # Legacy "with cleanup" = any presence of cleanup (not fully unprotected)
     with_cleanup = [r for r in allocating if r.status != "UNPROTECTED_ALLOCATION"]
@@ -530,8 +547,9 @@ def summarize_inventory(records: list[FunctionRecord]) -> dict[str, Any]:
         "functions_with_cleanup": len(fully_protected),
         "functions_partial_cleanup": len(partial),
         "functions_conditional_cleanup": len(conditional),
+        "functions_escape_path_gap": len(escape_gaps),
         "unprotected_functions": len(unprotected),
-        "functions_incomplete_cleanup": len(partial) + len(conditional),
+        "functions_incomplete_cleanup": len(partial) + len(conditional) + len(escape_gaps),
         # Primary UX metric (ring) — incomplete cleanup does NOT inflate safety
         "handle_safety_rate": handle_safety_rate,
         # Secondary: full cleanup rate among allocators only
@@ -561,10 +579,11 @@ def run_function_inventory(
     records = build_inventory(interesting)
     order = {
         "UNPROTECTED_ALLOCATION": 0,
-        "PARTIAL_CLEANUP": 1,
-        "CONDITIONAL_CLEANUP": 2,
-        "PROTECTED": 3,
-        "SAFE_NO_HANDLES": 4,
+        "ESCAPE_PATH_GAP": 1,
+        "PARTIAL_CLEANUP": 2,
+        "CONDITIONAL_CLEANUP": 3,
+        "PROTECTED": 4,
+        "SAFE_NO_HANDLES": 5,
     }
     records.sort(key=lambda r: (order.get(r.status, 9), r.design_element, r.function_name))
 

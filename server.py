@@ -163,14 +163,18 @@ def api_graph_code_audit(
     except Exception as exc:  # noqa: BLE001
         raise HTTPException(status_code=422, detail=f"Code audit failed: {exc}") from exc
 
-    # Persist compact snapshot for trends / CI (rules-only; don't block on LLM runs)
-    if not llm:
-        try:
-            from neon_db import ensure_audit_snapshot
+    # Persist snapshot for trends; include full findings when LLM ran
+    try:
+        from neon_db import ensure_audit_snapshot
 
-            ensure_audit_snapshot(graph_id, force=True, use_llm=False)
-        except Exception:  # noqa: BLE001
-            pass
+        ensure_audit_snapshot(
+            graph_id,
+            force=True,
+            use_llm=llm,
+            include_findings=True if llm else None,
+        )
+    except Exception:  # noqa: BLE001
+        pass
 
     return report.to_dict()
 
@@ -212,6 +216,52 @@ def api_graph_audit_snapshot(
     if not payload:
         raise HTTPException(status_code=404, detail="Graph not found")
     return payload
+
+
+@app.get("/api/graphs/{graph_id}/audit-trends")
+def api_graph_audit_trends(
+    graph_id: str,
+    limit: int = Query(20, ge=2, le=50),
+) -> dict[str, Any]:
+    """Handle-safety / CRITICAL trend for this NSF lineage (uploads + snapshot history)."""
+    from neon_db import get_graph, list_audit_trends
+
+    try:
+        row = get_graph(graph_id)
+    except (ValueError, ConnectionError) as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    if not row:
+        raise HTTPException(status_code=404, detail="Graph not found")
+    try:
+        points = list_audit_trends(
+            database_title=row.get("database_title"),
+            nsf_path=row.get("nsf_path"),
+            limit=limit,
+        )
+    except (ValueError, ConnectionError) as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    return {
+        "graph_id": graph_id,
+        "database_title": row.get("database_title"),
+        "nsf_path": row.get("nsf_path"),
+        "points": points,
+    }
+
+
+@app.post("/api/graphs/{graph_id}/runtime-signals")
+def api_runtime_signals(graph_id: str, body: dict[str, Any]) -> dict[str, Any]:
+    """Ingest Domino/OpenLog-style runtime handle warnings (DPOOL bridge stub)."""
+    from neon_db import append_runtime_signals
+
+    signals = body.get("signals") if isinstance(body, dict) else None
+    if not isinstance(signals, list) or not signals:
+        raise HTTPException(status_code=400, detail="Body must include non-empty signals[]")
+    try:
+        return append_runtime_signals(graph_id, signals)
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except (ConnectionError, RuntimeError) as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
 
 
 @app.post("/api/synthesize")

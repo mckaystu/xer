@@ -213,9 +213,12 @@ function computeNodeIssues() {
   const inventory = currentFunctionInventory?.inventory || [];
   inventory.forEach((row, idx) => {
     if (
-      !["UNPROTECTED_ALLOCATION", "PARTIAL_CLEANUP", "CONDITIONAL_CLEANUP"].includes(
-        row.status
-      )
+      ![
+        "UNPROTECTED_ALLOCATION",
+        "PARTIAL_CLEANUP",
+        "CONDITIONAL_CLEANUP",
+        "ESCAPE_PATH_GAP",
+      ].includes(row.status)
     ) {
       return;
     }
@@ -863,6 +866,7 @@ function renderRulesCatalog() {
 
 function inventoryStatusClass(status) {
   if (status === "UNPROTECTED_ALLOCATION") return "status-unprotected";
+  if (status === "ESCAPE_PATH_GAP") return "status-escape";
   if (status === "PARTIAL_CLEANUP") return "status-partial";
   if (status === "CONDITIONAL_CLEANUP") return "status-conditional";
   if (status === "PROTECTED") return "status-protected";
@@ -871,6 +875,7 @@ function inventoryStatusClass(status) {
 
 function inventoryStatusLabel(status) {
   if (status === "UNPROTECTED_ALLOCATION") return "Unprotected";
+  if (status === "ESCAPE_PATH_GAP") return "Escape-path gap";
   if (status === "PARTIAL_CLEANUP") return "Partial cleanup";
   if (status === "CONDITIONAL_CLEANUP") return "Conditional cleanup";
   if (status === "PROTECTED") return "Protected";
@@ -1284,6 +1289,53 @@ function renderCodeAuditCard(audit) {
   `;
 }
 
+function renderAuditTrendStrip(points) {
+  const list = Array.isArray(points) ? points : [];
+  if (list.length < 1) {
+    return `<section class="overview-section score-section" id="auditTrendSection">
+      <h2>Handle Safety Trend</h2>
+      <p class="placeholder">No audit snapshots yet — open Code Analysis or re-upload DXL to start a trend.</p>
+    </section>`;
+  }
+  const rates = list.map((p) =>
+    typeof p.handle_safety_rate === "number" ? p.handle_safety_rate : null
+  );
+  const crits = list.map((p) =>
+    typeof p.critical_active === "number" ? p.critical_active : 0
+  );
+  const maxCrit = Math.max(1, ...crits);
+  const bars = list
+    .map((p, i) => {
+      const rate = rates[i];
+      const crit = crits[i];
+      const h = rate == null ? 8 : Math.max(8, Math.round(rate));
+      const tip = `${p.at || p.parsed_at || "—"} · safety ${
+        rate == null ? "—" : rate + "%"
+      } · CRITICAL ${crit}`;
+      return `<div class="trend-bar" title="${escapeHtml(tip)}" style="--h:${h}%;--crit:${Math.round(
+        (crit / maxCrit) * 100
+      )}%"><span class="trend-fill"></span><span class="trend-crit"></span></div>`;
+    })
+    .join("");
+  const latest = list[list.length - 1] || {};
+  const latestRate =
+    typeof latest.handle_safety_rate === "number" ? `${latest.handle_safety_rate}%` : "—";
+  return `
+    <section class="overview-section score-section" id="auditTrendSection">
+      <h2>Handle Safety Trend</h2>
+      <div class="score-card risk-moderate">
+        <div class="score-copy">
+          <p class="score-rating">Latest safety ${escapeHtml(latestRate)} · CRITICAL ${
+            latest.critical_active ?? 0
+          }</p>
+          <p class="score-hint">${list.length} snapshot${list.length === 1 ? "" : "s"} across uploads for this NSF lineage.</p>
+          <div class="trend-chart" role="img" aria-label="Handle safety trend">${bars}</div>
+        </div>
+      </div>
+    </section>
+  `;
+}
+
 function renderCodeAuditTeaser(audit, inventory) {
   if (!audit && !inventory?.summary) {
     return `<section class="overview-section"><h2>Code Quality</h2><p class="placeholder">No code audit yet.</p></section>`;
@@ -1507,6 +1559,7 @@ function renderOverview(summary) {
   const dbs = summary.databases || [];
   const scoreCard = renderModernizationCard(currentAnalysis?.modernization_score);
   const codeTeaser = renderCodeAuditTeaser(currentCodeAudit, currentFunctionInventory);
+  const trendStrip = renderAuditTrendStrip(window.__xerAuditTrends || []);
 
   const dbHtml = dbs.length
     ? `<section class="overview-section"><h2>Databases (${dbs.length})</h2><ul class="overview-list">${dbs
@@ -1575,6 +1628,7 @@ function renderOverview(summary) {
     </div>
     ${scoreCard}
     ${codeTeaser}
+    ${trendStrip}
     ${dbHtml}
     <section class="overview-section">
       <h2>Business Capabilities</h2>
@@ -1612,16 +1666,18 @@ function renderOverview(summary) {
 async function loadSummary(graphId) {
   try {
     overviewContent.innerHTML = `<p class="placeholder">Loading application analysis…</p>`;
-    const [summary, analysis, codeAudit, functionInventory] = await Promise.all([
+    const [summary, analysis, codeAudit, functionInventory, trendPayload] = await Promise.all([
       fetchJson(`/api/graphs/${graphId}/summary`),
       fetchJson(`/api/graphs/${graphId}/analysis`).catch(() => null),
       fetchJson(`/api/graphs/${graphId}/code-audit`).catch(() => null),
       fetchJson(`/api/graphs/${graphId}/function-inventory`).catch(() => null),
+      fetchJson(`/api/graphs/${graphId}/audit-trends`).catch(() => null),
     ]);
     currentSummary = summary;
     currentAnalysis = analysis;
     currentCodeAudit = codeAudit;
     currentFunctionInventory = functionInventory;
+    window.__xerAuditTrends = trendPayload?.points || [];
     if (activeView === "overview") renderOverview(currentSummary);
     if (activeView === "code") renderCodeAnalysis();
     if (activeView === "rules") renderRulesCatalog();

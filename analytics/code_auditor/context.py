@@ -100,6 +100,8 @@ def inventory_risk_severity(*, status: str, in_loop: bool) -> Severity:
         return "LOW"
     if status == "CONDITIONAL_CLEANUP":
         return "HIGH" if in_loop else "MEDIUM"
+    if status == "ESCAPE_PATH_GAP":
+        return "CRITICAL" if in_loop else "HIGH"
     if status == "PARTIAL_CLEANUP":
         return "CRITICAL" if in_loop else "MEDIUM"
     # UNPROTECTED_ALLOCATION
