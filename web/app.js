@@ -1763,34 +1763,6 @@ function wireRefreshAnalysisButton() {
   });
 }
 
-async function wireAiValidationButton() {
-  const btn = document.getElementById("runAiValidationBtn");
-  if (!btn || btn.disabled) return;
-  btn.addEventListener("click", async () => {
-    const graphId = graphSelect.value;
-    if (!graphId) return;
-    const status = document.getElementById("aiValidationStatus");
-    btn.disabled = true;
-    btn.textContent = "Running AI audit…";
-    if (status) status.textContent = "Pass 1–3 findings + inventory FP review…";
-    try {
-      const audit = await fetchJson(`/api/graphs/${graphId}/code-audit?llm=true`);
-      currentCodeAudit = audit;
-      // Inventory is re-analyzed with use_llm inside the same snapshot refresh
-      currentFunctionInventory = await fetchJson(
-        `/api/graphs/${graphId}/function-inventory`
-      ).catch(() => currentFunctionInventory);
-      auditFindingFilter = "all";
-      renderCodeAnalysis();
-    } catch (err) {
-      btn.disabled = false;
-      btn.textContent = "Run AI Discrepancy Audit";
-      if (status) status.textContent = `AI audit failed: ${err.message}`;
-      showError(err.message);
-    }
-  });
-}
-
 function renderOverview(summary) {
   if (!summary) {
     overviewContent.innerHTML = `<p class="placeholder">No analysis available.</p>`;
