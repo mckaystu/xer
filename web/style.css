@@ -1553,6 +1553,90 @@ th { color: var(--muted); font-weight: 500; }
   color: #9aa7b5;
 }
 
+.related-findings {
+  margin-top: 16px;
+  padding-top: 12px;
+  border-top: 1px solid var(--border);
+}
+
+.related-findings h4 {
+  margin: 0 0 4px;
+  font-size: 0.85rem;
+}
+
+.related-findings-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin-top: 8px;
+}
+
+.related-finding-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  text-align: left;
+  width: 100%;
+  background: rgba(255, 255, 255, 0.03);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 8px 10px;
+  color: var(--text);
+  cursor: pointer;
+  font-size: 0.78rem;
+}
+
+.related-finding-row:hover {
+  border-color: var(--accent);
+}
+
+.findings-panel {
+  margin-bottom: 24px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--panel);
+  overflow: hidden;
+}
+
+.findings-panel-summary {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 8px 14px;
+  cursor: pointer;
+  padding: 14px 16px;
+  list-style: none;
+}
+
+.findings-panel-summary::-webkit-details-marker {
+  display: none;
+}
+
+.findings-panel-summary::before {
+  content: "▸";
+  color: var(--muted);
+  font-size: 0.85rem;
+}
+
+.findings-panel[open] > .findings-panel-summary::before {
+  content: "▾";
+}
+
+.findings-panel-title {
+  font-weight: 600;
+  font-size: 1rem;
+}
+
+.findings-panel > .overview-section {
+  margin: 0;
+  padding: 0 12px 12px;
+}
+
+.findings-panel .score-card {
+  margin-top: 0;
+}
+
 .list-toolbar {
   display: flex;
   flex-wrap: wrap;

@@ -108,6 +108,7 @@ let inventoryListFilter = "actionable"; // actionable | unprotected | partial | 
 let inventorySearch = "";
 let inventoryPage = 0;
 const INVENTORY_PAGE_SIZE = 25;
+let findingsPanelOpen = false; // collapsed by default — detail lives under inventory rows
 let pendingDeepDive = null; // { kind: "finding"|"inventory", idx: number } | null
 let fullGraph = null;
 let activeView = "code";
@@ -1151,6 +1152,71 @@ function renderFunctionInventoryCard(inventory) {
   `;
 }
 
+function findingsForInventoryFunction(fn) {
+  const findings = currentCodeAudit?.findings || [];
+  if (!fn || !findings.length) return [];
+  const name = String(fn.function_name || "")
+    .trim()
+    .toLowerCase();
+  const element = String(fn.design_element || "")
+    .trim()
+    .toLowerCase();
+  if (!name) return [];
+  const matched = [];
+  findings.forEach((f, idx) => {
+    if (f.is_false_positive) return;
+    const en = String(f.element_name || "")
+      .trim()
+      .toLowerCase();
+    const loc = String(f.location || "").toLowerCase();
+    const title = String(f.title || f.issue || "").toLowerCase();
+    const evidence = String(f.evidence || "").toLowerCase();
+    const designHit =
+      element &&
+      (en.includes(element) ||
+        loc.includes(element) ||
+        String(f.source_file || "")
+          .toLowerCase()
+          .includes(element.replace(/^javaclass:/, "")));
+    if (name === en || en.includes(name) || name.includes(en) || title.includes(name) || evidence.includes(name)) {
+      matched.push({ f, idx });
+      return;
+    }
+    if (designHit && (evidence.includes(name) || title.includes(name) || loc.includes(name))) {
+      matched.push({ f, idx });
+    }
+  });
+  const order = { CRITICAL: 0, HIGH: 1, MEDIUM: 2, LOW: 3 };
+  matched.sort(
+    (a, b) => (order[a.f.severity] ?? 9) - (order[b.f.severity] ?? 9) || (a.f.rule_id || "").localeCompare(b.f.rule_id || "")
+  );
+  return matched.slice(0, 8);
+}
+
+function renderRelatedFindingsBlock(fn) {
+  const related = findingsForInventoryFunction(fn);
+  if (!related.length) {
+    return `<div class="related-findings"><p class="score-hint">No linked rule findings for this function — inventory status is the primary signal.</p></div>`;
+  }
+  const rows = related
+    .map(
+      ({ f, idx }) => `
+      <button type="button" class="related-finding-row" data-finding-idx="${idx}">
+        <span class="sev-pill sev-${escapeHtml(f.severity)}">${escapeHtml(f.severity)}</span>
+        <code>${escapeHtml(f.rule_id || "")}</code>
+        <span>${escapeHtml(f.issue || f.title || "")}</span>
+      </button>`
+    )
+    .join("");
+  return `
+    <div class="related-findings">
+      <h4>Related findings (${related.length})</h4>
+      <p class="score-hint">Rule hits for this function — click to open As-Is / To-Be.</p>
+      <div class="related-findings-list">${rows}</div>
+    </div>
+  `;
+}
+
 function renderInventoryDeepDive(fn) {
   if (!fn) return "";
   const status = fn.status || "";
@@ -1239,6 +1305,8 @@ function renderInventoryDeepDive(fn) {
         <pre class="diff-code">${escapeHtml(toBe)}</pre>
       </div>
     </div>
+
+    ${renderRelatedFindingsBlock(fn)}
   `;
 }
 
@@ -1253,6 +1321,23 @@ function openInventoryDeepDive(idx) {
   document.getElementById("inventoryDeepDiveClose")?.addEventListener("click", () => {
     dive.classList.add("hidden");
     dive.innerHTML = "";
+  });
+  dive.querySelectorAll(".related-finding-row").forEach((btn) => {
+    btn.addEventListener("click", (ev) => {
+      ev.stopPropagation();
+      findingsPanelOpen = true;
+      const idx = Number(btn.dataset.findingIdx);
+      renderCodeAnalysis();
+      requestAnimationFrame(() => {
+        const details = document.getElementById("findingsPanelDetails");
+        if (details) details.open = true;
+        openAuditDeepDive(idx);
+        document.getElementById("codeAuditSection")?.scrollIntoView({
+          behavior: "smooth",
+          block: "nearest",
+        });
+      });
+    });
   });
   document.getElementById("inventoryMarkFpBtn")?.addEventListener("click", async (ev) => {
     ev.stopPropagation();
@@ -1473,16 +1558,18 @@ function renderCodeAuditCard(audit) {
   ).length;
 
   return `
+    <details class="findings-panel" id="findingsPanelDetails" ${findingsPanelOpen ? "open" : ""}>
+      <summary class="findings-panel-summary">
+        <span class="findings-panel-title">Handle &amp; Memory Findings</span>
+        <span class="score-hint">Rule-level detail · ${findings.length} findings · Risk ${escapeHtml(
+          risk
+        )} · expand to browse / filter</span>
+      </summary>
     <section class="overview-section score-section" id="codeAuditSection">
-      <h2>Handle &amp; Memory Findings</h2>
       <div class="score-card ${riskClass}">
         <div class="score-copy" style="margin-bottom:12px">
           <p class="score-rating">Handle Exhaustion Risk: ${escapeHtml(risk)}</p>
-          <p class="score-hint">C-API <code>.recycle()</code> for <strong>Java / SSJS / XPages</strong> only — LotusScript agents and libraries are out of scope and are not listed here.
-            ${findings.length} findings · Exhaustion C:${(audit.handle_exhaustion_severity_counts || counts).CRITICAL || 0} H:${(audit.handle_exhaustion_severity_counts || counts).HIGH || 0}
-            · scanned ${audit.blocks_prefiltered || 0}/${audit.blocks_scanned || 0} code blocks
-            · ${audit.llm_enabled ? "AI discrepancy on" : "rules-only"}
-            · click a row for As-Is / To-Be deep-dive</p>
+          <p class="score-hint">Use the inventory above as the work list. This panel is rule evidence (PERF/SEC/ownership/AI). Prefer opening a function row — related findings appear in its deep-dive.</p>
           <div class="findings-filter-bar" role="toolbar" aria-label="Category filters">
             ${filterBtn("all", "All Findings", findings.length)}
             ${filterBtn("handle", "Handle Exhaustion (Java/JS)", handleCount)}
@@ -1519,6 +1606,7 @@ function renderCodeAuditCard(audit) {
         <div id="auditDeepDive" class="audit-deep-dive hidden"></div>
       </div>
     </section>
+    </details>
   `;
 }
 
@@ -1654,7 +1742,7 @@ function renderCodeAnalysis() {
   codeAnalysisContent.innerHTML = `
     <div class="overview-header">
       <h2>Code Analysis</h2>
-      <p class="overview-sub">Java / SSJS / XPages C-API <code>.recycle()</code> inventory and findings only — LotusScript is out of scope. Click a finding for As-Is / To-Be remediation.</p>
+      <p class="overview-sub">Work list is the <strong>Function &amp; Recycle Inventory</strong> (Needs work). Open a row for As-Is / To-Be and related rule findings. Full findings stay collapsed below.</p>
       ${renderCodeAnalysisCacheBar()}
     </div>
     ${renderFunctionInventoryCard(currentFunctionInventory)}
@@ -1667,13 +1755,21 @@ function renderCodeAnalysis() {
   wireListPagers();
   wireExportChecklistButton();
   wireRefreshAnalysisButton();
+  document.getElementById("findingsPanelDetails")?.addEventListener("toggle", (e) => {
+    findingsPanelOpen = !!e.currentTarget.open;
+  });
   if (pendingDeepDive) {
     const pending = pendingDeepDive;
     pendingDeepDive = null;
     // Defer so DOM from wire* is ready
     requestAnimationFrame(() => {
       if (pending.kind === "inventory") openInventoryDeepDive(pending.idx);
-      else if (pending.kind === "finding") openAuditDeepDive(pending.idx);
+      else if (pending.kind === "finding") {
+        findingsPanelOpen = true;
+        const details = document.getElementById("findingsPanelDetails");
+        if (details) details.open = true;
+        openAuditDeepDive(pending.idx);
+      }
     });
   }
 }
