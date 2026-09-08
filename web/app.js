@@ -104,7 +104,7 @@ let currentFunctionInventory = null;
 let auditFindingFilter = "all"; // all | verified | false_positive | blind_spot | handle | performance | ai_discovered
 let pendingDeepDive = null; // { kind: "finding"|"inventory", idx: number } | null
 let fullGraph = null;
-let activeView = "focus";
+let activeView = "code";
 let focusNodeId = null;
 let focusTargetId = null;
 
@@ -2169,7 +2169,7 @@ dxlUpload?.addEventListener("change", async () => {
     currentSummary = null;
     currentAnalysis = null;
     await loadSelectedGraph();
-    setActiveView("overview");
+    setActiveView("code");
   } catch (e) {
     uploadStatus.textContent = e.message;
     uploadStatus.className = "upload-status error";
@@ -2206,6 +2206,7 @@ rulesLookupsOnly?.addEventListener("change", onRulesFilterChange);
     if (graphSelect.value) {
       await loadSelectedGraph();
     }
+    setActiveView(activeView);
   } catch (e) {
     showError(`API error: ${e.message}. Start the server with: uvicorn server:app`);
   }
