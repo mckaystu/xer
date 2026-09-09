@@ -104,6 +104,7 @@ let currentFunctionInventory = null;
 let auditFindingFilter = "all"; // all | verified | false_positive | blind_spot | handle | performance | ai_discovered | high_confidence
 const AI_CONFIDENCE_MIN_UI = 75; // mirrors default XER_AI_CONFIDENCE_MIN
 let inventoryListFilter = "actionable"; // actionable | unprotected | partial | all | fp | safe
+let inventoryLangFilter = "all"; // all | java_ssjs | java | ssjs | csjs
 let inventorySearch = "";
 let findingsPanelOpen = false; // collapsed by default — detail lives under inventory rows
 let pendingDeepDive = null; // { kind: "finding"|"inventory", idx: number } | null
@@ -941,10 +942,84 @@ function inventoryMatchesFilter(f, filter) {
   return true; // all
 }
 
-function filterInventoryRows(list, filter, search) {
+/** Client JS (csjs*) is out of scope for Handle Exhaustion. */
+function isClientJsInventoryRow(f) {
+  const lang = `${f.language || ""} ${f.language_label || ""}`.toLowerCase();
+  const de = `${f.design_element || ""}`.toLowerCase();
+  const event = `${f.event || ""}`.toLowerCase();
+  if (event === "client_library") return true;
+  if (lang.includes("csjs") || (lang.includes("client") && lang.includes("js"))) return true;
+  const lib = (de.includes(":") ? de.split(":").pop() : de).trim();
+  return lib.startsWith("csjs") || lib.startsWith("copy of csjs") || /(^|[\s/_-])csjs(?![a-z])/.test(lib);
+}
+
+function isJavaInventoryRow(f) {
+  if (isClientJsInventoryRow(f)) return false;
+  const lang = `${f.language || ""} ${f.language_label || ""}`.toLowerCase();
+  if (lang.includes("javascript") || lang.includes("ssjs") || lang.includes("jscript")) {
+    return false;
+  }
+  if (lang.includes("xpage") || lang.includes("xsp")) return false;
+  return /\bjava\b/.test(lang) || lang.trim() === "java";
+}
+
+function isSsjsInventoryRow(f) {
+  if (isClientJsInventoryRow(f)) return false;
+  const lang = `${f.language || ""} ${f.language_label || ""}`.toLowerCase();
+  const de = `${f.design_element || ""}`.toLowerCase();
+  const lib = (de.includes(":") ? de.split(":").pop() : de).trim();
+  if (lib.startsWith("ssjs") || lib.startsWith("copy of ssjs") || /(^|[\s/_-])ssjs(?![a-z])/.test(lib)) {
+    return true;
+  }
+  if (lang.includes("xpage") || lang.includes("xsp") || lang.includes("lotus")) return false;
+  if (isJavaInventoryRow(f)) return false;
+  return (
+    lang.includes("ssjs") ||
+    lang.includes("javascript") ||
+    lang.includes("jscript") ||
+    lang.trim() === "js"
+  );
+}
+
+function inventoryMatchesLangFilter(f, langFilter) {
+  if (langFilter === "all") return true;
+  if (langFilter === "csjs") return isClientJsInventoryRow(f);
+  if (langFilter === "java") return isJavaInventoryRow(f);
+  if (langFilter === "ssjs") return isSsjsInventoryRow(f);
+  // java_ssjs — server-side focus (excludes CSJS)
+  return isJavaInventoryRow(f) || isSsjsInventoryRow(f);
+}
+
+function inventoryRowSortKey(f) {
+  const sevRank = { CRITICAL: 0, HIGH: 1, MEDIUM: 2, LOW: 3 };
+  const statusRank = {
+    UNPROTECTED_ALLOCATION: 0,
+    ESCAPE_PATH_GAP: 1,
+    PARTIAL_CLEANUP: 2,
+    CONDITIONAL_CLEANUP: 3,
+    PROTECTED: 4,
+    SAFE_NO_HANDLES: 5,
+  };
+  let langRank = 2;
+  if (isClientJsInventoryRow(f)) langRank = 3;
+  else if (isSsjsInventoryRow(f)) langRank = 0;
+  else if (isJavaInventoryRow(f)) langRank = 1;
+  const sev = String(f.risk_severity || f.severity || "MEDIUM").toUpperCase();
+  return [
+    f.is_false_positive ? 1 : 0,
+    langRank, // SSJS first, CSJS last
+    sevRank[sev] ?? 9,
+    statusRank[f.status] ?? 9,
+    f.design_element || "",
+    f.function_name || "",
+  ];
+}
+
+function filterInventoryRows(list, filter, search, langFilter = inventoryLangFilter) {
   const q = (search || "").trim().toLowerCase();
   return (list || [])
     .map((f, idx) => ({ f, idx }))
+    .filter(({ f }) => inventoryMatchesLangFilter(f, langFilter))
     .filter(({ f }) => inventoryMatchesFilter(f, filter))
     .filter(({ f }) => {
       if (!q) return true;
@@ -952,6 +1027,15 @@ function filterInventoryRows(list, filter, search) {
         f.language || ""
       } ${f.status || ""}`.toLowerCase();
       return hay.includes(q);
+    })
+    .sort((a, b) => {
+      const ka = inventoryRowSortKey(a.f);
+      const kb = inventoryRowSortKey(b.f);
+      for (let i = 0; i < ka.length; i++) {
+        if (ka[i] < kb[i]) return -1;
+        if (ka[i] > kb[i]) return 1;
+      }
+      return 0;
     });
 }
 
@@ -989,16 +1073,31 @@ function renderFunctionInventoryCard(inventory) {
       ? `<p class="score-hint coverage-warning" role="status"><strong>${recycleAmongAllocators}%</strong> of allocators actually clean up — handle-table risk remains high despite the blended safety rate.</p>`
       : "";
   const allRows = inventory.inventory || [];
-  const fpInv = allRows.filter((f) => f.is_false_positive).length;
-  const actionableCount = allRows.filter((f) =>
+  const scopedRows = allRows.filter((f) => inventoryMatchesLangFilter(f, inventoryLangFilter));
+  const fpInv = scopedRows.filter((f) => f.is_false_positive).length;
+  const actionableCount = scopedRows.filter((f) =>
     inventoryMatchesFilter(f, "actionable")
   ).length;
+  const unprotectedScoped = scopedRows.filter((f) =>
+    inventoryMatchesFilter(f, "unprotected")
+  ).length;
+  const incompleteScoped = scopedRows.filter((f) => inventoryMatchesFilter(f, "partial")).length;
+  const safeScoped = scopedRows.filter((f) => inventoryMatchesFilter(f, "safe")).length;
+  const javaCount = allRows.filter((f) => isJavaInventoryRow(f)).length;
+  const ssjsCount = allRows.filter((f) => isSsjsInventoryRow(f)).length;
+  const csjsCount = allRows.filter((f) => isClientJsInventoryRow(f)).length;
+  const javaSsjsCount = allRows.filter((f) => inventoryMatchesLangFilter(f, "java_ssjs")).length;
   const filtered = filterInventoryRows(allRows, inventoryListFilter, inventorySearch);
 
   const filterBtn = (id, label, count) => {
     const active = inventoryListFilter === id ? "active" : "";
     const countHtml = typeof count === "number" ? ` <span class="filter-count">${count}</span>` : "";
     return `<button type="button" class="findings-filter ${active}" data-inventory-filter="${id}">${label}${countHtml}</button>`;
+  };
+  const langBtn = (id, label, count) => {
+    const active = inventoryLangFilter === id ? "active" : "";
+    const countHtml = typeof count === "number" ? ` <span class="filter-count">${count}</span>` : "";
+    return `<button type="button" class="findings-filter ${active}" data-inventory-lang="${id}">${label}${countHtml}</button>`;
   };
 
   const rows = filtered
@@ -1020,7 +1119,13 @@ function renderFunctionInventoryCard(inventory) {
           <td>${escapeHtml(sev)}</td>
           <td><span class="status-pill ${inventoryStatusClass(f.status)}">${escapeHtml(
             inventoryStatusLabel(f.status)
-          )}</span></td>
+          )}</span>${
+            isClientJsInventoryRow(f)
+              ? ` <span class="ai-badge" title="Client JavaScript — low priority for handle exhaustion">CSJS</span>`
+              : isSsjsInventoryRow(f)
+                ? ` <span class="ai-badge ai-badge-verified" title="Server JavaScript — high priority">SSJS</span>`
+                : ""
+          }</td>
           <td>${f.recycle_call_count}</td>
         </tr>`;
     })
@@ -1047,6 +1152,11 @@ function renderFunctionInventoryCard(inventory) {
           ? `<p class="coverage-sub"><em>${s.lotus_script_units_skipped}</em> LotusScript unit(s) skipped for Handle Exhaustion inventory.</p>`
           : ""
       }
+      ${
+        s.csjs_functions_low_priority || csjsCount
+          ? `<p class="coverage-sub"><em>${s.csjs_functions_low_priority || csjsCount}</em> CSJS (client) function(s) tagged <strong>LOW</strong> priority — SSJS / Java sort first.</p>`
+          : ""
+      }
     </div>`;
 
   return `
@@ -1062,8 +1172,9 @@ function renderFunctionInventoryCard(inventory) {
             <p class="score-rating">Handle Safety Rate</p>
             <p class="score-hint">
               Share of <em>Java / SSJS / XPages</em> functions that are handle-free or that
-              allocate and call <code>.recycle()</code>. LotusScript is excluded — it does not
-              share the same C-API handle-table exhaustion model.
+              allocate and call <code>.recycle()</code>. <code>csjs*</code> client libraries stay
+              in the list as <strong>LOW</strong> priority; <strong>SSJS</strong> ranks first.
+              LotusScript is excluded from Handle Exhaustion.
             </p>
             <div class="score-metrics inventory-metrics">
               <div class="metric"><span class="metric-label">Functions scanned</span><strong>${scanned}</strong></div>
@@ -1083,19 +1194,36 @@ function renderFunctionInventoryCard(inventory) {
         </div>
         ${allocatorCleanupWarning}
         ${rateExplainer}
+        <div class="findings-filter-bar" role="toolbar" aria-label="Language focus">
+          ${langBtn("all", "All languages", allRows.length)}
+          ${langBtn("ssjs", "SSJS (priority)", ssjsCount)}
+          ${langBtn("java_ssjs", "Java + SSJS", javaSsjsCount)}
+          ${langBtn("java", "Java only", javaCount)}
+          ${langBtn("csjs", "CSJS (low)", csjsCount)}
+        </div>
         <div class="findings-filter-bar" role="toolbar" aria-label="Inventory filters">
           ${filterBtn("actionable", "Needs work", actionableCount)}
-          ${filterBtn("unprotected", "Unprotected", unprotected)}
-          ${filterBtn("partial", "Partial / gaps", incomplete)}
+          ${filterBtn("unprotected", "Unprotected", unprotectedScoped)}
+          ${filterBtn("partial", "Partial / gaps", incompleteScoped)}
           ${filterBtn("fp", "False positives", fpInv)}
-          ${filterBtn("safe", "Safe / protected", safeNoHandles + withCleanup)}
-          ${filterBtn("all", "All functions", scanned)}
+          ${filterBtn("safe", "Safe / protected", safeScoped)}
+          ${filterBtn("all", "All functions", scopedRows.length)}
         </div>
         <div class="list-toolbar">
           <input type="search" id="inventorySearchInput" placeholder="Search function, class, id…" value="${escapeHtml(
             inventorySearch
           )}" />
-          <span class="score-hint">${filtered.length} match${filtered.length === 1 ? "" : "es"}</span>
+          <span class="score-hint">${filtered.length} match${filtered.length === 1 ? "" : "es"} · ${
+            inventoryLangFilter === "ssjs"
+              ? "SSJS priority"
+              : inventoryLangFilter === "java_ssjs"
+                ? "Java + SSJS"
+                : inventoryLangFilter === "java"
+                  ? "Java"
+                  : inventoryLangFilter === "csjs"
+                    ? "CSJS low"
+                    : "all (SSJS first)"
+          }</span>
         </div>
         ${
           rows
@@ -1697,6 +1825,15 @@ function renderCodeAnalysisCacheBar() {
         <a class="ai-run-btn export-docx-btn" id="exportChecklistBtn" href="${docxHref}" download>
           Download Word checklist
         </a>
+        <a
+          class="ai-run-btn export-docx-btn"
+          id="exportRubricBtn"
+          href="/api/code-analysis/rubric.docx"
+          download="Xer_Code_Analysis_Rules_Rubric.docx"
+          title="Static search rules, scoring rubric, and AI inference passes"
+        >
+          Download rules &amp; rubric
+        </a>
         <button type="button" class="ai-run-btn" id="refreshAnalysisBtn">Refresh analysis</button>
       </div>
     </div>
@@ -1916,6 +2053,12 @@ function wireInventoryListControls() {
   document.querySelectorAll("[data-inventory-filter]").forEach((btn) => {
     btn.addEventListener("click", () => {
       inventoryListFilter = btn.dataset.inventoryFilter || "actionable";
+      renderCodeAnalysis();
+    });
+  });
+  document.querySelectorAll("[data-inventory-lang]").forEach((btn) => {
+    btn.addEventListener("click", () => {
+      inventoryLangFilter = btn.dataset.inventoryLang || "all";
       renderCodeAnalysis();
     });
   });
@@ -2493,6 +2636,7 @@ async function loadSelectedGraph() {
   currentFunctionInventory = null;
   auditFindingFilter = "all";
   inventoryListFilter = "actionable";
+  inventoryLangFilter = "all";
   inventorySearch = "";
   syncEdgeFilterForGraph();
   populateFocusSelect();

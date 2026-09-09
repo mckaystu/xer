@@ -168,3 +168,18 @@ def test_build_checklist_docx_priority_functions():
     assert "Notes: " not in xml  # dropped per-item notes lines for brevity
     # Yellow highlight applied to problem line(s)
     assert "w:highlight" in xml and 'w:val="yellow"' in xml
+
+
+def test_build_code_analysis_rubric_docx():
+    from analytics.code_auditor.docx_export import build_code_analysis_rubric_docx
+
+    data = build_code_analysis_rubric_docx()
+    assert data[:2] == b"PK"
+    with zipfile.ZipFile(io.BytesIO(data)) as zf:
+        xml = zf.read("word/document.xml").decode("utf-8")
+    assert "Rules &amp; Rubric" in xml or "Rules & Rubric" in xml
+    assert "DOM-002" in xml
+    assert "Pass 1" in xml
+    assert "Pass 2" in xml
+    assert "Pass 3" in xml
+    assert "Static search rules" in xml or "search rules" in xml.lower()

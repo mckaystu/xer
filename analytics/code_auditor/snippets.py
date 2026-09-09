@@ -296,11 +296,18 @@ REMEDIATION_GUIDES: dict[str, dict[str, str]] = {
 
 def normalize_language(language: str | None) -> str:
     lang = (language or "").strip().lower()
-    if lang in {"lotusscript", "ls", "lss", "notes"}:
+    if lang in {"lotusscript", "ls", "lss", "notes"} or "lotus" in lang:
         return "lotusscript"
-    if lang in {"javascript", "js", "ssjs", "jscript", "xpages", "jss"}:
-        return "javascript"
-    if lang in {"java"}:
+    if lang in {"csjs", "client_javascript", "client-javascript"} or "csjs" in lang:
+        return "csjs"
+    if lang in {"ssjs", "jscript"} or lang.startswith("ssjs"):
+        return "ssjs"
+    if lang in {"javascript", "js", "jss"}:
+        # Ambiguous legacy label — treat as SSJS for remediation templates
+        return "ssjs"
+    if "xpage" in lang or lang == "xsp":
+        return "xpages"
+    if lang == "java" or (lang.startswith("java") and "script" not in lang):
         return "java"
     return lang or "java"
 
@@ -310,12 +317,15 @@ def language_label(language: str | None) -> str:
     return {
         "lotusscript": "LotusScript",
         "java": "Java",
-        "javascript": "SSJS / JavaScript",
+        "ssjs": "SSJS",
+        "csjs": "CSJS (client)",
+        "xpages": "XPages",
+        "javascript": "SSJS",
     }.get(lang, language or "Unknown")
 
 
 def is_java_like(language: str | None) -> bool:
-    return normalize_language(language) in {"java", "javascript"}
+    return normalize_language(language) in {"java", "javascript", "ssjs", "xpages"}
 
 
 def remediation_template(

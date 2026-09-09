@@ -45,12 +45,13 @@ var blueprism = {
 """
 
 
-def _scriptlibrary_dxl(name: str, source: str) -> str:
+def _scriptlibrary_dxl(name: str, source: str, *, client: bool = False) -> str:
     payload = _b64_chunk(source)
+    item = "$ClientJavaScriptLibrary" if client else "$ServerJavaScriptLibrary"
     return f"""<?xml version="1.0" encoding="UTF-8"?>
 <database xmlns="http://www.lotus.com/dxl">
   <scriptlibrary name="{name}" hide="v3 v4strict">
-    <item name="$ServerJavaScriptLibrary" sign="true">
+    <item name="{item}" sign="true">
       <rawitemdata type="1">{payload}</rawitemdata>
     </item>
   </scriptlibrary>
@@ -83,7 +84,7 @@ class TestParserAndExtractor:
         model = parse_script_library(lib_elem, "t.dxl", "db1")
         assert model.code_events
         body = model.code_events[0].body
-        assert model.code_events[0].language == "javascript"
+        assert model.code_events[0].language == "ssjs"
         assert "exportUnprocessed" in body
         assert "uploadFile" in body
         assert "getAttachment" in body
@@ -92,8 +93,56 @@ class TestParserAndExtractor:
         units = extract_units_from_dxl_bytes(_scriptlibrary_dxl("ssjs", MINI_SSJS), "t.dxl")
         ssjs = [u for u in units if u.element_name == "ssjs"]
         assert len(ssjs) == 1
-        assert ssjs[0].language == "javascript"
+        assert ssjs[0].language == "ssjs"
         assert "exportUnprocessed" in ssjs[0].body
+
+    def test_client_js_tagged_csjs_low_priority_not_removed(self):
+        from analytics.code_auditor.context import inventory_risk_severity
+        from analytics.code_auditor.function_inventory import run_function_inventory
+
+        dxl = _scriptlibrary_dxl("csjsClaims", "var x = 1;\nfunction hi(){ return 1; }\n", client=True)
+        units = extract_units_from_dxl_bytes(dxl, "t.dxl")
+        assert units
+        assert units[0].language == "csjs"
+        assert units[0].event == "client_library"
+        assert (
+            inventory_risk_severity(
+                status="UNPROTECTED_ALLOCATION",
+                in_loop=True,
+                language="csjs",
+                element_name="csjsClaims",
+            )
+            == "LOW"
+        )
+        graph = {
+            "business_logic": [
+                {
+                    "owner_type": "scriptlibrary",
+                    "owner_name": "csjsClaims",
+                    "language": "javascript",
+                    "event": "client_library",
+                    "body": "function hi(){ var doc = db.getDocumentByUNID(id); while(doc){ doc = db.getDocumentByUNID(id); } }\n",
+                },
+                {
+                    "owner_type": "scriptlibrary",
+                    "owner_name": "ssjsApi",
+                    "language": "javascript",
+                    "event": "library",
+                    "body": "function exportUnprocessed(){ var doc = db.getDocumentByUNID(id); while(doc!=null){ doc = db.getDocumentByUNID(id); } }\n",
+                },
+            ]
+        }
+        out = run_function_inventory(graph=graph)
+        inv = out["inventory"]
+        names = [r["function_name"] for r in inv]
+        assert "exportUnprocessed" in names
+        assert "hi" in names  # CSJS kept, not removed
+        # SSJS sorts before CSJS
+        assert names.index("exportUnprocessed") < names.index("hi")
+        csjs_rows = [r for r in inv if "csjs" in (r.get("design_element") or "").lower()]
+        assert csjs_rows
+        assert all(r.get("risk_severity") == "LOW" for r in csjs_rows)
+        assert out["summary"].get("csjs_functions_low_priority", 0) >= 1
 
     def test_inventory_sees_claims_payments_methods(self):
         units = extract_units_from_dxl_bytes(_scriptlibrary_dxl("ssjs", MINI_SSJS), "t.dxl")

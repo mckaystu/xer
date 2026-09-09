@@ -113,7 +113,7 @@ class TestAuditorExtractorFileData:
         )
         units = extract_units_from_dxl_bytes(dxl, "fixture.dxl")
         java = [u for u in units if u.language == "java"]
-        js = [u for u in units if u.language == "javascript"]
+        js = [u for u in units if u.language in {"javascript", "ssjs", "xpages"}]
         assert java
         assert any("Reporting" in u.element_name for u in java)
         assert js
@@ -132,7 +132,7 @@ class TestFrombossRestJavaXspLive:
         graph = build_graph_from_dxl_bytes(content, path.name)
         bl = graph["business_logic"]
         java = [b for b in bl if b.get("language") == "java"]
-        js = [b for b in bl if b.get("language") == "javascript"]
+        js = [b for b in bl if b.get("language") in {"javascript", "ssjs"}]
         xpages = [b for b in bl if b.get("language") == "xpages"]
         assert len(java) >= 100, f"expected ~109 java files, got {len(java)}"
         assert len(xpages) >= 50, f"expected many xpages, got {len(xpages)}"

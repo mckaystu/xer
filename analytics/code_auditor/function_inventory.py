@@ -21,8 +21,10 @@ from analytics.code_auditor.api_catalog import (
 from analytics.code_auditor.context import (
     NON_LOOP_HYGIENE_NOTE,
     body_has_loop,
+    inventory_language_priority,
     inventory_risk_severity,
     is_capi_handle_language,
+    is_client_javascript,
     is_lotusscript_language,
 )
 from analytics.code_auditor.extractor import (
@@ -130,8 +132,10 @@ def _language_label(lang: str) -> str:
     low = (lang or "").lower()
     if "lotus" in low:
         return "LotusScript"
+    if "csjs" in low or "client" in low:
+        return "CSJS (client)"
     if low in {"ssjs", "jscript"} or "javascript" in low or low == "js":
-        return "SSJS / JavaScript"
+        return "SSJS"
     if "xpage" in low or low == "xsp":
         return "XPages"
     if "java" in low:
@@ -487,7 +491,7 @@ def _attach_inventory_snippets(
         "problem_breakdown": problem,
         "remediation_guide": guide,
         "handle_lifecycle_warning": warning,
-        "language_label": language if language in {"LotusScript", "Java", "SSJS / JavaScript", "XPages"} else language_label(language),
+                "language_label": language if language in {"LotusScript", "Java", "SSJS", "SSJS / JavaScript", "XPages", "CSJS (client)"} else language_label(language),
     }
 
 
@@ -501,7 +505,13 @@ def build_inventory(units: Iterable[CodeUnit]) -> list[FunctionRecord]:
             status = analysis.status  # type: ignore[assignment]
             lang_label = _language_label(unit.language)
             looped = body_has_loop(fn_body)
-            risk = inventory_risk_severity(status=status, in_loop=looped)
+            risk = inventory_risk_severity(
+                status=status,
+                in_loop=looped,
+                language=unit.language,
+                event=unit.event,
+                element_name=unit.element_name,
+            )
             snippets = _attach_inventory_snippets(
                 display_body=display_body or fn_body,
                 analysis_body=fn_body,
@@ -512,12 +522,27 @@ def build_inventory(units: Iterable[CodeUnit]) -> list[FunctionRecord]:
                 in_loop=looped,
                 unclean_vars=analysis.unclean_vars,
             )
+            if is_client_javascript(
+                unit.language, event=unit.event, element_name=unit.element_name
+            ):
+                # Tag CSJS as client-side / low priority for handle exhaustion work.
+                snippets["problem_breakdown"] = (
+                    f"`{name}` is Client JavaScript (CSJS) — browser-side script, not Domino "
+                    "C-API handle-table exhaustion. Tagged LOW priority; focus SSJS / Java first. "
+                    + (snippets.get("problem_breakdown") or "")
+                ).strip()
+                snippets["handle_lifecycle_warning"] = (
+                    "LOW priority (CSJS / client). Server SSJS and Java handle leaks rank higher."
+                )
+                snippets["language_label"] = "CSJS (client)"
             records.append(
                 FunctionRecord(
                     id=f"FUNC-{seq:03d}",
                     design_element=_design_element(unit),
                     function_name=name,
-                    language=lang_label,
+                    language=lang_label if not is_client_javascript(
+                        unit.language, event=unit.event, element_name=unit.element_name
+                    ) else "CSJS (client)",
                     allocates_handles=analysis.allocates,
                     recycle_call_count=analysis.recycle_call_count,
                     status=status,
@@ -541,7 +566,11 @@ def summarize_inventory(records: list[FunctionRecord]) -> dict[str, Any]:
 
     False-positive rows (AI or human) are treated as resolved for risk metrics.
     """
-    capi = [r for r in records if is_capi_handle_language(r.language)]
+    capi = [
+        r
+        for r in records
+        if is_capi_handle_language(r.language, element_name=r.design_element)
+    ]
     ls_recs = [r for r in records if is_lotusscript_language(r.language)]
     total = len(capi)
     fp_count = sum(1 for r in capi if r.is_false_positive)
@@ -628,24 +657,48 @@ def run_function_inventory(
     interesting = apply_prefilter(units, require_keywords=False)
     interesting = [u for u in interesting if (u.language or "").lower() != "formula"]
     ls_skipped = sum(1 for u in interesting if is_lotusscript_language(u.language))
-    # Primary C-API recycle inventory — Java / JS / XPages libraries & agents
-    capi_units = [u for u in interesting if is_capi_handle_language(u.language)]
-    records = build_inventory(capi_units)
+    # Include CSJS in the work list (tagged LOW). Exclude only LotusScript from inventory rows.
+    # Handle-safety ring metrics still ignore CSJS via is_capi_handle_language in summarize.
+    inv_units = [
+        u
+        for u in interesting
+        if is_capi_handle_language(u.language, event=u.event, element_name=u.element_name)
+        or is_client_javascript(u.language, event=u.event, element_name=u.element_name)
+    ]
+    csjs_count = sum(
+        1
+        for u in inv_units
+        if is_client_javascript(u.language, event=u.event, element_name=u.element_name)
+    )
+    records = build_inventory(inv_units)
     notes: list[str] = []
+    if csjs_count:
+        notes.append(
+            f"{csjs_count} Client JavaScript (CSJS) unit(s) included as LOW priority — "
+            "SSJS / Java handle exhaustion ranks first."
+        )
     llm_enabled = False
     if use_llm:
         from analytics.code_auditor.llm_engine import enrich_inventory_with_llm, llm_available
 
         if llm_available():
-            records, inv_notes = enrich_inventory_with_llm(
-                records, max_functions=max_llm_functions
+            # AI FP review focuses on server-side C-API risk, not browser CSJS.
+            server_recs = [
+                r
+                for r in records
+                if not is_client_javascript(r.language, element_name=r.design_element)
+            ]
+            reviewed, inv_notes = enrich_inventory_with_llm(
+                server_recs, max_functions=max_llm_functions
             )
+            by_id = {r.id: r for r in reviewed}
+            records = [by_id.get(r.id, r) for r in records]
             notes.extend(inv_notes)
             llm_enabled = True
         else:
             notes.append("Inventory AI review skipped — OPENAI_API_KEY not set.")
 
-    order = {
+    status_order = {
         "UNPROTECTED_ALLOCATION": 0,
         "ESCAPE_PATH_GAP": 1,
         "PARTIAL_CLEANUP": 2,
@@ -653,10 +706,14 @@ def run_function_inventory(
         "PROTECTED": 4,
         "SAFE_NO_HANDLES": 5,
     }
+    sev_order = {"CRITICAL": 0, "HIGH": 1, "MEDIUM": 2, "LOW": 3}
     records.sort(
         key=lambda r: (
             0 if r.is_false_positive else 1,
-            order.get(r.status, 9),
+            # SSJS first, then Java, then other server, CSJS last
+            inventory_language_priority(r.language, element_name=r.design_element),
+            sev_order.get(r.risk_severity, 9),
+            status_order.get(r.status, 9),
             r.design_element,
             r.function_name,
         )
@@ -664,6 +721,11 @@ def run_function_inventory(
 
     summary = summarize_inventory(records)
     summary["lotus_script_units_skipped"] = ls_skipped
+    summary["csjs_functions_low_priority"] = sum(
+        1
+        for r in records
+        if is_client_javascript(r.language, element_name=r.design_element)
+    )
     return {
         "summary": summary,
         "inventory": [r.to_dict() for r in records],

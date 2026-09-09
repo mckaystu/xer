@@ -72,30 +72,44 @@ def _status_label(status: str) -> str:
     return str(status or "").replace("_", " ").title()
 
 
-def _function_priority_key(row: dict[str, Any]) -> tuple:
-    sev = str(row.get("risk_severity") or row.get("severity") or "MEDIUM").upper()
-    status = str(row.get("status") or "")
-    in_loop = 0 if row.get("in_loop") else 1
-    return (
-        _SEV_PRIORITY.get(sev, 9),
-        _STATUS_PRIORITY.get(status, 9),
-        in_loop,
-        str(row.get("design_element") or ""),
-        str(row.get("function_name") or ""),
-    )
-
-
 def _actionable_functions(inventory: dict[str, Any] | None) -> list[dict[str, Any]]:
+    from analytics.code_auditor.context import is_client_javascript, is_java_or_ssjs_language
+
     rows = []
     if isinstance(inventory, dict):
         rows = [r for r in (inventory.get("inventory") or []) if isinstance(r, dict)]
-    actionable = [
-        r
-        for r in rows
-        if r.get("status") in _ACTIONABLE_STATUSES and not r.get("is_false_positive")
-    ]
+    actionable = []
+    for r in rows:
+        if r.get("status") not in _ACTIONABLE_STATUSES or r.get("is_false_positive"):
+            continue
+        lang = str(r.get("language") or r.get("language_label") or "")
+        element = str(r.get("design_element") or "")
+        event = str(r.get("event") or "")
+        # Include Java, SSJS, and CSJS (CSJS stays LOW and sorts last).
+        if is_java_or_ssjs_language(lang, event=event, element_name=element) or is_client_javascript(
+            lang, event=event, element_name=element
+        ):
+            actionable.append(r)
     actionable.sort(key=_function_priority_key)
     return actionable
+
+
+def _function_priority_key(row: dict[str, Any]) -> tuple:
+    from analytics.code_auditor.context import inventory_language_priority
+
+    sev = str(row.get("risk_severity") or row.get("severity") or "MEDIUM").upper()
+    status = str(row.get("status") or "")
+    in_loop = 0 if row.get("in_loop") else 1
+    lang = str(row.get("language") or row.get("language_label") or "")
+    element = str(row.get("design_element") or "")
+    return (
+        inventory_language_priority(lang, element_name=element),  # SSJS first, CSJS last
+        _SEV_PRIORITY.get(sev, 9),
+        _STATUS_PRIORITY.get(status, 9),
+        in_loop,
+        element,
+        str(row.get("function_name") or ""),
+    )
 
 
 def _finding_sort_key(f: Finding) -> tuple:
@@ -485,3 +499,206 @@ def _add_finding_condensed(doc: Document, idx: int, f: Finding) -> None:
 def slug_filename(title: str | None) -> str:
     base = re.sub(r"[^\w\-]+", "_", (title or "xer_code_audit").strip())[:60].strip("_")
     return f"{base or 'xer_code_audit'}_priority_checklist.docx"
+
+
+def build_code_analysis_rubric_docx() -> bytes:
+    """Word doc: static search rules, scoring rubric, and AI inference passes."""
+    from collections import defaultdict
+
+    from analytics.code_auditor.models import RULE_CATALOG
+    from analytics.code_auditor.snippets import PROBLEM_BREAKDOWNS, remediation_guide
+
+    doc = Document()
+    section = doc.sections[0]
+    section.top_margin = Inches(0.75)
+    section.bottom_margin = Inches(0.75)
+    section.left_margin = Inches(0.85)
+    section.right_margin = Inches(0.85)
+
+    heading = doc.add_heading("Xer Code Analysis — Rules & Rubric", level=0)
+    heading.alignment = WD_ALIGN_PARAGRAPH.LEFT
+
+    meta = doc.add_paragraph()
+    meta.add_run("Generated: ").bold = True
+    meta.add_run(datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC"))
+    meta2 = doc.add_paragraph()
+    meta2.add_run(
+        "This document is the live catalog of static search rules, scoring rubric, and AI "
+        "inference passes used by Xer Code Analysis. It is generated from the product rule "
+        "catalog (not a frozen copy)."
+    )
+
+    # —— Pipeline ——
+    doc.add_heading("1. Analysis pipeline", level=1)
+    for step in (
+        "Extract Java / SSJS / XPages (and formula) units from the DXL / application graph.",
+        "Run deterministic static search rules (DOM-*, PERF-*, SEC-*, FORM-*, DOM-OWN-*).",
+        "Build the Function & Recycle Inventory (handle allocation vs cleanup per function).",
+        "When OPENAI_API_KEY is set: run AI Pass 1–3 (FP filter, blind spots, ownership).",
+        "Apply confidence gate (default XER_AI_CONFIDENCE_MIN=75) and human triage overrides.",
+    ):
+        doc.add_paragraph(step, style="List Number")
+
+    doc.add_paragraph(
+        "Handle Exhaustion scope is Java / SSJS / XPages only. LotusScript LS-DOM-* detectors "
+        "remain in the catalog for reference but are not wired into Handle Exhaustion scoring."
+    )
+
+    # —— Rubric / scoring ——
+    doc.add_heading("2. Scoring rubric", level=1)
+    doc.add_heading("Severity", level=2)
+    sev_rows = [
+        ("CRITICAL", "Handle exhaustion in loops / hot paths; ODA misuse that can stall threads."),
+        ("HIGH", "Missing recycle scaffolding, conditional cleanup, ownership gaps, NIF/perf risks."),
+        ("MEDIUM", "Hygiene or expensive patterns that are less likely to exhaust the handle table."),
+        ("LOW", "One-shot / non-loop hygiene (often demoted by AI VERIFIED_NON_LOOP)."),
+    ]
+    table = doc.add_table(rows=1 + len(sev_rows), cols=2)
+    table.style = "Table Grid"
+    table.rows[0].cells[0].text = "Severity"
+    table.rows[0].cells[1].text = "Meaning"
+    for i, (sev, meaning) in enumerate(sev_rows, start=1):
+        table.rows[i].cells[0].text = sev
+        table.rows[i].cells[1].text = meaning
+
+    doc.add_heading("Inventory statuses", level=2)
+    for line in (
+        "SAFE_NO_HANDLES — no Domino allocation signals in the function.",
+        "PROTECTED — allocates and has matching .recycle() / Delete cleanup.",
+        "PARTIAL_CLEANUP / CONDITIONAL_CLEANUP / ESCAPE_PATH_GAP — incomplete cleanup paths.",
+        "UNPROTECTED_ALLOCATION — allocates with no explicit cleanup.",
+    ):
+        doc.add_paragraph(line, style="List Bullet")
+
+    doc.add_heading("Key metrics", level=2)
+    for line in (
+        "Handle safety rate = (safe + fully protected) / Java-JS functions scanned.",
+        "Recycle coverage among allocators = share of allocating functions that actually clean up.",
+        "Allocation inside a collection loop → CRITICAL; one-shot helpers → LOW/MEDIUM hygiene.",
+    ):
+        doc.add_paragraph(line, style="List Bullet")
+
+    # —— Static search rules ——
+    doc.add_heading("3. Static search rules", level=1)
+    doc.add_paragraph(
+        "Deterministic detectors (regex / AST-light heuristics). Each finding cites a rule id."
+    )
+
+    by_cat: dict[str, list[tuple[str, dict[str, str]]]] = defaultdict(list)
+    for rid, meta_r in RULE_CATALOG.items():
+        by_cat[meta_r.get("category") or "Other"].append((rid, meta_r))
+
+    preferred = [
+        "C-API Handle Leaks & Object Recycling",
+        "Handle Ownership",
+        "Framework Conflicts",
+        "Static Variables & Lifetime Anti-Patterns",
+        "High-Memory & Expensive Data Patterns",
+        "Performance & NIF Indexing",
+        "Application Security",
+        "Formula Quality",
+        "AI Discrepancy & Blind Spots",
+        "LotusScript Handle Lifecycle",
+    ]
+    categories = [c for c in preferred if c in by_cat] + sorted(
+        c for c in by_cat if c not in preferred
+    )
+
+    for cat in categories:
+        doc.add_heading(cat, level=2)
+        if cat == "LotusScript Handle Lifecycle":
+            doc.add_paragraph(
+                "Reference only — not applied to Handle Exhaustion inventory or UI work list."
+            )
+        rules = sorted(by_cat[cat], key=lambda x: x[0])
+        table = doc.add_table(rows=1 + len(rules), cols=4)
+        table.style = "Table Grid"
+        hdr = table.rows[0].cells
+        hdr[0].text = "ID"
+        hdr[1].text = "Default sev"
+        hdr[2].text = "Title"
+        hdr[3].text = "What it searches for"
+        for i, (rid, meta_r) in enumerate(rules, start=1):
+            desc = PROBLEM_BREAKDOWNS.get(rid) or meta_r.get("title") or ""
+            # Strip language suffix if present later — PROBLEM_BREAKDOWNS is plain.
+            table.rows[i].cells[0].text = rid
+            table.rows[i].cells[1].text = str(meta_r.get("default_severity") or "")
+            table.rows[i].cells[2].text = str(meta_r.get("title") or "")
+            table.rows[i].cells[3].text = _safe(desc, 420)
+        doc.add_paragraph()
+
+    doc.add_heading("Remediation philosophy", level=2)
+    doc.add_paragraph(
+        "Java / SSJS / XPages: assign intermediates, advance collections with a next-handle "
+        "variable, release with .recycle() in finally on every path."
+    )
+    doc.add_paragraph(
+        "LotusScript (hygiene reference): Delete Notes* objects (or Call obj.Recycle) before "
+        "re-assignment; Set x = Nothing alone is not enough."
+    )
+    doc.add_paragraph(
+        "ODA (org.openntf.domino): do not manually recycle — framework owns lifecycle."
+    )
+
+    # Sample guides for top handle rules
+    doc.add_heading("Example remediation guides (Java)", level=2)
+    for rid in ("DOM-001", "DOM-002", "DOM-010", "DOM-013", "PERF-001", "DOM-OWN-001"):
+        if rid not in RULE_CATALOG:
+            continue
+        p = doc.add_paragraph()
+        p.add_run(f"{rid}: ").bold = True
+        p.add_run(_safe(remediation_guide(rid, "java"), 500))
+
+    # —— AI inference ——
+    doc.add_heading("4. AI inference rules", level=1)
+    doc.add_paragraph(
+        "AI runs automatically when analysis is computed and OPENAI_API_KEY is configured. "
+        "Cached reloads stay fast; Refresh analysis recomputes with AI. Reviews below the "
+        "confidence threshold (default 75%) are discarded."
+    )
+
+    doc.add_heading("Pass 1 — False-positive / severity filter", level=2)
+    doc.add_paragraph(
+        "Input: static-rule findings + surrounding code. Verdicts:"
+    )
+    for line in (
+        "FALSE_POSITIVE — cleanup is clearly present or framework-owned (ODA, helper Delete, etc.).",
+        "VERIFIED_NON_LOOP — real issue but one-shot / non-loop → demote to LOW hygiene.",
+        "VERIFIED — real leak / anti-pattern, especially inside collection loops.",
+    ):
+        doc.add_paragraph(line, style="List Bullet")
+    doc.add_paragraph(
+        "Conservative: only mark FALSE_POSITIVE when cleanup is clear. Emits confidence 0–100."
+    )
+
+    doc.add_heading("Pass 2 — Blind-spot detector (DOM-BS-001)", level=2)
+    doc.add_paragraph(
+        "Runs on units that allocate Domino handles but had zero static hits. Looks for "
+        "nested branches, early exits, conditional loops skipping recycle, exception paths, "
+        "and re-assignment without releasing the prior handle. Empty result if genuinely safe."
+    )
+
+    doc.add_heading("Pass 3 — Cross-module ownership (DOM-BS-002)", level=2)
+    doc.add_paragraph(
+        "Caller/callee contracts across related units: who must Delete/.recycle() when a "
+        "Document is returned or passed. Escalates severity for scheduled/background agents "
+        "vs one-shot UI events. Skips elements already covered by deterministic DOM-OWN-001."
+    )
+
+    doc.add_heading("What AI does not do", level=2)
+    for line in (
+        "Does not rewrite application business logic or invent unique To-Be patches per function.",
+        "Does not replace static rules — it validates, demotes, or adds residual gaps.",
+        "Does not override a human Mark as false positive triage (persisted in Neon).",
+    ):
+        doc.add_paragraph(line, style="List Bullet")
+
+    doc.add_paragraph()
+    footer = doc.add_paragraph()
+    footer.add_run(
+        "Generated by Xer · Download again anytime from Code Analysis to get the current catalog."
+    ).italic = True
+
+    buf = io.BytesIO()
+    doc.save(buf)
+    return buf.getvalue()

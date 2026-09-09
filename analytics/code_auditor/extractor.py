@@ -9,9 +9,19 @@ from typing import Iterable
 
 from analytics.code_auditor.models import CodeUnit
 
-CODE_TAGS = {"java", "lotusscript", "javascript", "jscript", "ssjs", "formula", "source", "script"}
+CODE_TAGS = {"java", "lotusscript", "javascript", "jscript", "ssjs", "csjs", "formula", "source", "script"}
 # Formula is interesting for FORM-* quality rules (not C-API recycle inventory).
-INTERESTING_LANGS = {"java", "lotusscript", "javascript", "jscript", "ssjs", "source", "script", "formula"}
+INTERESTING_LANGS = {
+    "java",
+    "lotusscript",
+    "javascript",
+    "jscript",
+    "ssjs",
+    "csjs",
+    "source",
+    "script",
+    "formula",
+}
 
 PREFILTER_KEYWORDS: list[tuple[str, re.Pattern[str]]] = [
     ("session", re.compile(r"\bsession\b", re.I)),
@@ -142,13 +152,18 @@ def extract_units_from_dxl_bytes(content: bytes | str, source_file: str) -> list
         parent = parent_map.get(elem)
         if parent is not None and local_tag(parent) == "code":
             event = elem_attr(parent, "event")
-            language = tag if tag != "script" else (elem_attr(elem, "language") or "javascript")
+            language = tag if tag != "script" else (elem_attr(elem, "language") or "ssjs")
         elif tag in {"script", "source"}:
             language = (elem_attr(elem, "language") or elem_attr(elem, "type") or tag).lower()
             if "javascript" in language or language in {"js", "ssjs", "jscript"}:
-                language = "javascript"
+                language = "ssjs"
             elif "java" in language:
                 language = "java"
+
+        if language in {"javascript", "jscript", "js"}:
+            language = "ssjs"
+        elif language == "csjs":
+            language = "csjs"
 
         if language == "formula":
             # Always extract formula for FORM-* quality track (not handle recycle).
@@ -182,23 +197,23 @@ def extract_units_from_dxl_bytes(content: bytes | str, source_file: str) -> list
 
 
 def _extract_server_js_libraries(root: ET.Element, source_file: str, text: str) -> list[CodeUnit]:
-    from dxl_ssjs import extract_server_javascript_library, extract_client_javascript_library
+    from dxl_ssjs import extract_client_javascript_library, extract_server_javascript_library
 
     units: list[CodeUnit] = []
     for elem in root.iter():
         if local_tag(elem) != "scriptlibrary":
             continue
         name = elem_attr(elem, "name") or "Unnamed"
-        for body, event in (
-            (extract_server_javascript_library(elem), "library"),
-            (extract_client_javascript_library(elem), "client_library"),
+        for body, event, language in (
+            (extract_server_javascript_library(elem), "library", "ssjs"),
+            (extract_client_javascript_library(elem), "client_library", "csjs"),
         ):
             if not body:
                 continue
             name_idx = text.find(f"name='{name}'")
             if name_idx < 0:
                 name_idx = text.find(f'name="{name}"')
-            idx = text.find("$ServerJavaScriptLibrary")
+            idx = text.find("$ServerJavaScriptLibrary" if language == "ssjs" else "$ClientJavaScriptLibrary")
             start_line = text.count("\n", 0, name_idx) + 1 if name_idx >= 0 else (
                 text.count("\n", 0, idx) + 1 if idx >= 0 else 1
             )
@@ -207,7 +222,7 @@ def _extract_server_js_libraries(root: ET.Element, source_file: str, text: str) 
                     source_file=source_file,
                     element_name=name,
                     element_type="scriptlibrary",
-                    language="javascript",
+                    language=language,
                     event=event,
                     body=body,
                     start_line=start_line,
@@ -264,7 +279,7 @@ def extract_units_from_path(path: Path) -> list[CodeUnit]:
                 ".lss": "lotusscript",
                 ".ls": "lotusscript",
                 ".java": "java",
-                ".jss": "javascript",
+                ".jss": "ssjs",
                 ".xsp": "xpages",
             }.get(suffix, "unknown")
             units.append(
@@ -286,19 +301,31 @@ def extract_units_from_path(path: Path) -> list[CodeUnit]:
 
 def extract_units_from_graph(graph: dict) -> list[CodeUnit]:
     """Build audit units from a stored Xer application graph (no raw DXL needed)."""
+    from analytics.code_auditor.context import is_client_javascript
+
     units: list[CodeUnit] = []
     for block in graph.get("business_logic") or []:
         lang = (block.get("language") or "unknown").lower()
         body = block.get("body") or ""
         if not body.strip():
             continue
+        event = block.get("event")
+        owner = block.get("owner_name") or "unknown"
+        # Normalize legacy javascript labels into ssjs vs csjs.
+        if is_client_javascript(lang, event=event, element_name=owner):
+            lang = "csjs"
+        elif lang in {"javascript", "jscript", "js"} or (
+            lang == "ssjs"
+        ) or (event or "").lower() in {"library", "server_library"}:
+            if lang not in {"ssjs", "csjs"}:
+                lang = "ssjs"
         units.append(
             CodeUnit(
                 source_file=block.get("source_file") or "graph",
-                element_name=block.get("owner_name") or "unknown",
+                element_name=owner,
                 element_type=block.get("owner_type") or "unknown",
                 language=lang,
-                event=block.get("event"),
+                event=event,
                 body=body,
                 start_line=1,
                 keywords_matched=prefilter_keywords(body),

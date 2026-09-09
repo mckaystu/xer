@@ -21,7 +21,7 @@ Xer audits HCL Domino application code extracted from DXL / On-Disk Projects (an
 | CLI auditor | `domino_dxl_auditor.py` |
 | Language-scoped upgrade scan | `upgrade_scan.py` |
 | API | `GET /api/graphs/{id}/code-audit` (cached by default; AI auto-runs on compute when `OPENAI_API_KEY` set; `?refresh=true` / `?llm=false`) |
-| UI | Code Analysis tab — **Download Word checklist** (condensed analysis + priority function list), **Refresh analysis** |
+| UI | Code Analysis tab — **Download Word checklist**, **Download rules & rubric** (search rules + scoring + AI passes), **Refresh analysis** |
 | Engine package | `analytics/code_auditor/` |
 
 ---

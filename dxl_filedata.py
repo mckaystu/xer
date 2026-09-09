@@ -179,7 +179,7 @@ def _classify_title(title: str) -> tuple[str, str] | None:
     if base.endswith(".xsp"):
         return "xpages", "xpage"
     if base.endswith((".jss", ".js")):
-        return "javascript", "javascript_resource"
+        return "ssjs", "javascript_resource"
     return None
 
 

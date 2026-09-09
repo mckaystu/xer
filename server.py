@@ -372,6 +372,25 @@ def api_graph_code_audit_docx(
     )
 
 
+@app.get("/api/code-analysis/rubric.docx")
+def api_code_analysis_rubric_docx() -> Response:
+    """Download the live Code Analysis search-rules / rubric / AI-inference Word guide."""
+    from analytics.code_auditor.docx_export import build_code_analysis_rubric_docx
+
+    try:
+        payload = build_code_analysis_rubric_docx()
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(status_code=500, detail=f"Rubric DOCX export failed: {exc}") from exc
+
+    return Response(
+        content=payload,
+        media_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        headers={
+            "Content-Disposition": 'attachment; filename="Xer_Code_Analysis_Rules_Rubric.docx"'
+        },
+    )
+
+
 @app.get("/api/graphs/{graph_id}/audit-snapshot")
 def api_graph_audit_snapshot(
     graph_id: str,

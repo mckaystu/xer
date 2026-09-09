@@ -268,19 +268,23 @@ def extract_code_blocks(container: ET.Element, context: str) -> list[CodeBlock]:
 
 
 def extract_server_js_code_blocks(scriptlibrary_elem: ET.Element, context: str) -> list[CodeBlock]:
-    """Decode ``$ServerJavaScriptLibrary`` / ``$ClientJavaScriptLibrary`` payloads."""
+    """Decode ``$ServerJavaScriptLibrary`` / ``$ClientJavaScriptLibrary`` payloads.
+
+    Server libraries are tagged ``ssjs``; client libraries ``csjs`` so handle-exhaustion
+    analysis can ignore browser-side script.
+    """
     from dxl_ssjs import extract_client_javascript_library, extract_server_javascript_library
 
     blocks: list[CodeBlock] = []
-    for body, event in (
-        (extract_server_javascript_library(scriptlibrary_elem), "library"),
-        (extract_client_javascript_library(scriptlibrary_elem), "client_library"),
+    for body, event, language in (
+        (extract_server_javascript_library(scriptlibrary_elem), "library", "ssjs"),
+        (extract_client_javascript_library(scriptlibrary_elem), "client_library", "csjs"),
     ):
         if not body:
             continue
         blocks.append(
             CodeBlock(
-                language="javascript",
+                language=language,
                 event=event,
                 body=body,
                 context=context,
@@ -1485,6 +1489,8 @@ class ApplicationGraphBuilder:
             return "java_logic"
         if code.language in {"javascript", "jscript", "ssjs"}:
             return "javascript_logic"
+        if code.language in {"csjs", "client_javascript"}:
+            return "client_javascript_logic"
         if code.language in {"xpages", "xsp"}:
             return "xpages_logic"
         return "general_formula"
