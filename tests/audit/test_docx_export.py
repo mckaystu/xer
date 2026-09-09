@@ -102,6 +102,8 @@ def test_build_checklist_docx_priority_functions():
                 "recycle_call_count": 0,
                 "problem_breakdown": "Allocates in loop without recycle",
                 "remediation_guide": "recycle in finally",
+                "code_snippet_as_is": "var doc = view.getFirstDocument();\nwhile (doc != null) {\n  doc = view.getNextDocument(doc);\n}",
+                "code_snippet_to_be": "Document doc = view.getFirstDocument();\nwhile (doc != null) {\n  Document nextDoc = view.getNextDocument(doc);\n  try {\n    // Process current document\n  } finally {\n    doc.recycle(); // Release native C-API handle\n  }\n  doc = nextDoc;\n}",
             },
             {
                 "function_name": "exportUnprocessed",
@@ -112,6 +114,8 @@ def test_build_checklist_docx_priority_functions():
                 "in_loop": False,
                 "allocates_handles": True,
                 "recycle_call_count": 0,
+                "code_snippet_as_is": "Session s = NotesFactory.createSession();",
+                "code_snippet_to_be": "try { ... } finally { if (s != null) s.recycle(); }",
             },
         ],
     }
@@ -133,3 +137,9 @@ def test_build_checklist_docx_priority_functions():
     # Priority order: CRITICAL uploadFile before HIGH exportUnprocessed
     assert xml.index("uploadFile") < xml.index("exportUnprocessed")
     assert "Document leak in loop" in xml
+    # Bad code present; generic To-Be templates omitted
+    assert "Bad code" in xml
+    assert "view.getNextDocument(doc)" in xml
+    assert "Release native C-API handle" not in xml
+    assert "Process current document" not in xml
+    assert "Notes: " not in xml  # dropped per-item notes lines for brevity

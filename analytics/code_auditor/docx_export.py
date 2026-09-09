@@ -180,7 +180,8 @@ def build_code_audit_checklist_docx(
 
     doc.add_paragraph(
         "Scope: Java / SSJS / XPages C-API .recycle(). LotusScript is out of scope. "
-        "Work the function checklist in order — highest priority first."
+        "Work the function checklist in order — each item shows the bad code to fix. "
+        "Generic recycle patterns live in the Xer UI deep-dive, not repeated here."
     )
 
     inv_summary = {}
@@ -246,7 +247,8 @@ def build_code_audit_checklist_docx(
     guide.add_run("How to use: ").bold = True
     guide.add_run(
         "Address CRITICAL then HIGH functions first (especially anything in a loop). "
-        "Tick each box when fixed, note owner/date, then re-run Xer Code Analysis."
+        "Use the Bad code block to locate the leak, apply .recycle() / finally cleanup, "
+        "tick the box when fixed, then re-run Xer Code Analysis."
     )
 
     # —— Priority function checklist (main deliverable) ——
@@ -263,7 +265,7 @@ def build_code_audit_checklist_docx(
     doc.add_page_break()
     doc.add_heading(f"Related findings (top {len(findings_short)} by severity)", level=1)
     doc.add_paragraph(
-        "Rule findings that back the function work above. Full As-Is / To-Be detail lives in the Xer UI."
+        "Rule hits that back the function work above — evidence only (no duplicated fix templates)."
     )
     if not findings_short:
         doc.add_paragraph("No active Java/SSJS/XPages findings for this graph.")
@@ -278,6 +280,18 @@ def build_code_audit_checklist_docx(
     buf = io.BytesIO()
     doc.save(buf)
     return buf.getvalue()
+
+
+def _add_code_block(doc: Document, label: str, code: str, *, limit: int = 1400) -> None:
+    text = _safe(code, limit)
+    if not text:
+        return
+    p = doc.add_paragraph()
+    p.add_run(label).bold = True
+    code_p = doc.add_paragraph(text)
+    for run in code_p.runs:
+        run.font.name = "Consolas"
+        run.font.size = Pt(8)
 
 
 def _add_function_block(doc: Document, idx: int, row: dict[str, Any], report: AuditReport) -> None:
@@ -305,13 +319,7 @@ def _add_function_block(doc: Document, idx: int, row: dict[str, Any], report: Au
     if why:
         p = doc.add_paragraph()
         p.add_run("Why: ").bold = True
-        p.add_run(_safe(why, 900))
-
-    action = row.get("remediation_guide") or ""
-    if action:
-        p = doc.add_paragraph()
-        p.add_run("Action: ").bold = True
-        p.add_run(_safe(action, 700))
+        p.add_run(_safe(why, 500))
 
     unclean = row.get("unclean_vars") or []
     if unclean:
@@ -319,30 +327,20 @@ def _add_function_block(doc: Document, idx: int, row: dict[str, Any], report: Au
         p.add_run("Uncleaned handles: ").bold = True
         p.add_run(", ".join(str(v) for v in unclean[:12]))
 
-    to_be = row.get("code_snippet_to_be") or ""
-    if to_be:
-        p = doc.add_paragraph()
-        p.add_run("To-Be:").bold = True
-        code = doc.add_paragraph(_safe(to_be, 1800))
-        for run in code.runs:
-            run.font.name = "Consolas"
-            run.font.size = Pt(8)
+    # Bad code only — skip generic To-Be templates (duplicated across every row).
+    as_is = row.get("code_snippet_as_is") or ""
+    _add_code_block(doc, "Bad code:", as_is, limit=1200)
 
     related = _findings_for_function(report, row)
     if related:
         p = doc.add_paragraph()
         p.add_run("Related rules: ").bold = True
-        p.add_run(
-            "; ".join(f"{f.rule_id} ({f.severity})" for f in related)
-        )
+        p.add_run("; ".join(f"{f.rule_id} ({f.severity})" for f in related))
 
     notes = doc.add_paragraph()
     notes.add_run(
         "☐ Fixed   ☐ N/A / accepted risk   Owner: ___________   Date: ___________"
     ).font.size = Pt(10)
-    notes2 = doc.add_paragraph()
-    notes2.add_run("Notes: ").italic = True
-    notes2.add_run("_______________________________________________________________")
     doc.add_paragraph()
 
 
@@ -354,11 +352,8 @@ def _add_finding_condensed(doc: Document, idx: int, f: Finding) -> None:
         f"{f.language_label or f.language}  ·  "
         f"{f.element_type}:{f.element_name} L{f.line}  ·  conf {f.confidence}%"
     ).font.size = Pt(10)
-    action = f.action_required or f.remediation_guide or f.remediation or ""
-    if action:
-        p = doc.add_paragraph()
-        p.add_run("Action: ").bold = True
-        p.add_run(_safe(action, 500))
+    bad = f.code_snippet_as_is or f.evidence or ""
+    _add_code_block(doc, "Bad code:", bad, limit=900)
     doc.add_paragraph()
 
 
