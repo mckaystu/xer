@@ -103,12 +103,8 @@ let currentCodeAudit = null;
 let currentFunctionInventory = null;
 let auditFindingFilter = "all"; // all | verified | false_positive | blind_spot | handle | performance | ai_discovered | high_confidence
 const AI_CONFIDENCE_MIN_UI = 75; // mirrors default XER_AI_CONFIDENCE_MIN
-let findingsPage = 0;
-const FINDINGS_PAGE_SIZE = 25;
 let inventoryListFilter = "actionable"; // actionable | unprotected | partial | all | fp | safe
 let inventorySearch = "";
-let inventoryPage = 0;
-const INVENTORY_PAGE_SIZE = 25;
 let findingsPanelOpen = false; // collapsed by default — detail lives under inventory rows
 let pendingDeepDive = null; // { kind: "finding"|"inventory", idx: number } | null
 let fullGraph = null;
@@ -959,42 +955,6 @@ function filterInventoryRows(list, filter, search) {
     });
 }
 
-function paginateItems(items, page, pageSize) {
-  const total = items.length;
-  const pages = Math.max(1, Math.ceil(total / pageSize) || 1);
-  const safePage = Math.min(Math.max(0, page), pages - 1);
-  const start = safePage * pageSize;
-  return {
-    page: safePage,
-    pages,
-    total,
-    start,
-    end: Math.min(start + pageSize, total),
-    slice: items.slice(start, start + pageSize),
-  };
-}
-
-function renderListPager(prefix, pager) {
-  const { page, pages, total, start, end } = pager;
-  if (total === 0) {
-    return `<div class="list-pager"><span>No matching items</span></div>`;
-  }
-  return `
-    <div class="list-pager">
-      <span>Showing ${start + 1}–${end} of ${total}</span>
-      <div class="list-pager-actions">
-        <button type="button" class="ai-run-btn" data-${prefix}-page="prev" ${
-          page <= 0 ? "disabled" : ""
-        }>Previous</button>
-        <span>Page ${page + 1} / ${pages}</span>
-        <button type="button" class="ai-run-btn" data-${prefix}-page="next" ${
-          page >= pages - 1 ? "disabled" : ""
-        }>Next</button>
-      </div>
-    </div>
-  `;
-}
-
 function renderFunctionInventoryCard(inventory) {
   if (!inventory?.summary) {
     return `<section class="overview-section"><h2>Function &amp; Recycle Inventory</h2><p class="placeholder">Inventory not available for this graph.</p></section>`;
@@ -1034,8 +994,6 @@ function renderFunctionInventoryCard(inventory) {
     inventoryMatchesFilter(f, "actionable")
   ).length;
   const filtered = filterInventoryRows(allRows, inventoryListFilter, inventorySearch);
-  const pager = paginateItems(filtered, inventoryPage, INVENTORY_PAGE_SIZE);
-  inventoryPage = pager.page;
 
   const filterBtn = (id, label, count) => {
     const active = inventoryListFilter === id ? "active" : "";
@@ -1043,7 +1001,7 @@ function renderFunctionInventoryCard(inventory) {
     return `<button type="button" class="findings-filter ${active}" data-inventory-filter="${id}">${label}${countHtml}</button>`;
   };
 
-  const rows = pager.slice
+  const rows = filtered
     .map(({ f, idx }) => {
       const fpBadge = f.is_false_positive
         ? ` <span class="ai-badge ai-badge-fp">False Positive</span>`
@@ -1137,15 +1095,13 @@ function renderFunctionInventoryCard(inventory) {
           <input type="search" id="inventorySearchInput" placeholder="Search function, class, id…" value="${escapeHtml(
             inventorySearch
           )}" />
-          <span class="score-hint">${pager.total} match${pager.total === 1 ? "" : "es"} · ${INVENTORY_PAGE_SIZE}/page</span>
+          <span class="score-hint">${filtered.length} match${filtered.length === 1 ? "" : "es"}</span>
         </div>
-        ${renderListPager("inventory", pager)}
         ${
           rows
             ? `<div class="table-scroll"><table class="overview-table inventory-table"><thead><tr><th>ID</th><th>Function</th><th>Design element</th><th>Sev</th><th>Status</th><th>Recycles</th></tr></thead><tbody>${rows}</tbody></table></div>`
             : `<p class="placeholder">No functions match this filter.</p>`
         }
-        ${renderListPager("inventory", pager)}
         <p class="score-hint coverage-hint">Click a row for As-Is / To-Be deep-dive. Mark FP on a row to persist across refreshes.</p>
         <div id="inventoryDeepDive" class="audit-deep-dive hidden"></div>
       </div>
@@ -1522,9 +1478,7 @@ function renderCodeAuditCard(audit) {
   const findings = audit.findings || [];
   const aiSum = audit.ai_discrepancy_summary || {};
   const filtered = filterAuditFindings(findings, auditFindingFilter);
-  const findingsPager = paginateItems(filtered, findingsPage, FINDINGS_PAGE_SIZE);
-  findingsPage = findingsPager.page;
-  const rows = findingsPager.slice
+  const rows = filtered
     .map(({ f, idx }) => {
       const bucket = findingFilterBucket(f);
       const cat = findingCategoryBucket(f);
@@ -1611,7 +1565,6 @@ function renderCodeAuditCard(audit) {
             }</span>
           </div>
         </div>
-        ${renderListPager("findings", findingsPager)}
         ${
           rows
             ? `<div class="table-scroll"><table class="overview-table audit-table"><thead><tr><th>ID</th><th>Sev</th><th>Issue</th><th>Lang</th><th>Location</th><th>Conf</th></tr></thead><tbody>${rows}</tbody></table></div>`
@@ -1621,7 +1574,6 @@ function renderCodeAuditCard(audit) {
                   : "No handle-leak / memory anti-patterns detected in stored script blocks."
               }</p>`
         }
-        ${renderListPager("findings", findingsPager)}
         <div id="auditDeepDive" class="audit-deep-dive hidden"></div>
       </div>
     </section>
@@ -1771,7 +1723,6 @@ function renderCodeAnalysis() {
   wireCodeAuditDeepDive();
   wireAuditFindingFilters();
   wireInventoryListControls();
-  wireListPagers();
   wireExportChecklistButton();
   wireRefreshAnalysisButton();
   document.getElementById("findingsPanelDetails")?.addEventListener("toggle", (e) => {
@@ -1956,7 +1907,6 @@ function wireAuditFindingFilters() {
   document.querySelectorAll("[data-findings-filter]").forEach((btn) => {
     btn.addEventListener("click", () => {
       auditFindingFilter = btn.dataset.findingsFilter || "all";
-      findingsPage = 0;
       renderCodeAnalysis();
     });
   });
@@ -1966,7 +1916,6 @@ function wireInventoryListControls() {
   document.querySelectorAll("[data-inventory-filter]").forEach((btn) => {
     btn.addEventListener("click", () => {
       inventoryListFilter = btn.dataset.inventoryFilter || "actionable";
-      inventoryPage = 0;
       renderCodeAnalysis();
     });
   });
@@ -1975,7 +1924,6 @@ function wireInventoryListControls() {
   search.addEventListener("keydown", (e) => {
     if (e.key === "Enter") {
       inventorySearch = search.value || "";
-      inventoryPage = 0;
       renderCodeAnalysis();
       const again = document.getElementById("inventorySearchInput");
       if (again) {
@@ -1987,33 +1935,7 @@ function wireInventoryListControls() {
   });
   search.addEventListener("change", () => {
     inventorySearch = search.value || "";
-    inventoryPage = 0;
     renderCodeAnalysis();
-  });
-}
-
-function wireListPagers() {
-  document.querySelectorAll("[data-inventory-page]").forEach((btn) => {
-    btn.addEventListener("click", () => {
-      const dir = btn.dataset.inventoryPage;
-      inventoryPage += dir === "next" ? 1 : -1;
-      renderCodeAnalysis();
-      document.getElementById("functionInventorySection")?.scrollIntoView({
-        behavior: "smooth",
-        block: "start",
-      });
-    });
-  });
-  document.querySelectorAll("[data-findings-page]").forEach((btn) => {
-    btn.addEventListener("click", () => {
-      const dir = btn.dataset.findingsPage;
-      findingsPage += dir === "next" ? 1 : -1;
-      renderCodeAnalysis();
-      document.getElementById("codeAuditSection")?.scrollIntoView({
-        behavior: "smooth",
-        block: "start",
-      });
-    });
   });
 }
 
@@ -2570,10 +2492,8 @@ async function loadSelectedGraph() {
   currentCodeAudit = null;
   currentFunctionInventory = null;
   auditFindingFilter = "all";
-  findingsPage = 0;
   inventoryListFilter = "actionable";
   inventorySearch = "";
-  inventoryPage = 0;
   syncEdgeFilterForGraph();
   populateFocusSelect();
   // Await audit/inventory BEFORE first graph paint so badges are present immediately
