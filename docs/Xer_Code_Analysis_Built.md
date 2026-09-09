@@ -71,9 +71,11 @@ DXL / ODP / application graph
 | DOM-015 | Un-recycled ViewNavigator / ViewEntryCollection |
 | DOM-016 | `search` / `FTSearch` collection leaks in loops |
 
-### LotusScript (`LS-DOM-001` … `LS-DOM-008`) — *disabled*
+### LotusScript — out of scope
 
-LotusScript object lifetimes do not map to Java C-API handle-table exhaustion. Detectors remain in `ls_rules.py` for reference but are **not** registered in `run_rule_engine` and do not appear in the UI.
+LotusScript does not create the same native C-API handle-table exhaustion risk as Java/SSJS
+`.recycle()` leaks. **LS-DOM-* rules are not wired**, do not appear in the UI work list, and
+are **omitted from the Download rules & rubric** Word guide.
 
 ### Performance & NIF (`PERF-001` … `PERF-003`)
 

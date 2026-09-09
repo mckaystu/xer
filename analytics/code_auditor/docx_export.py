@@ -524,8 +524,8 @@ def build_code_analysis_rubric_docx() -> bytes:
     meta2 = doc.add_paragraph()
     meta2.add_run(
         "This document is the live catalog of static search rules, scoring rubric, and AI "
-        "inference passes used by Xer Code Analysis. It is generated from the product rule "
-        "catalog (not a frozen copy)."
+        "inference passes for Domino C-API handle exhaustion (Java / SSJS / XPages). "
+        "LotusScript is omitted — it does not share the Java C-API handle-table allocation model."
     )
 
     # —— Pipeline ——
@@ -540,8 +540,9 @@ def build_code_analysis_rubric_docx() -> bytes:
         doc.add_paragraph(step, style="List Number")
 
     doc.add_paragraph(
-        "Handle Exhaustion scope is Java / SSJS / XPages only. LotusScript LS-DOM-* detectors "
-        "remain in the catalog for reference but are not wired into Handle Exhaustion scoring."
+        "Out of scope: LotusScript. LS object lifetimes do not create the same native C-API "
+        "handle-table exhaustion risk as Java/SSJS .recycle() leaks, so LotusScript rules are "
+        "not part of this rubric or the Handle Exhaustion work list."
     )
 
     # —— Rubric / scoring ——
@@ -586,6 +587,9 @@ def build_code_analysis_rubric_docx() -> bytes:
 
     by_cat: dict[str, list[tuple[str, dict[str, str]]]] = defaultdict(list)
     for rid, meta_r in RULE_CATALOG.items():
+        # Omit LotusScript — not a C-API handle-table exhaustion concern.
+        if rid.startswith("LS-DOM") or (meta_r.get("category") or "") == "LotusScript Handle Lifecycle":
+            continue
         by_cat[meta_r.get("category") or "Other"].append((rid, meta_r))
 
     preferred = [
@@ -598,7 +602,6 @@ def build_code_analysis_rubric_docx() -> bytes:
         "Application Security",
         "Formula Quality",
         "AI Discrepancy & Blind Spots",
-        "LotusScript Handle Lifecycle",
     ]
     categories = [c for c in preferred if c in by_cat] + sorted(
         c for c in by_cat if c not in preferred
@@ -606,10 +609,6 @@ def build_code_analysis_rubric_docx() -> bytes:
 
     for cat in categories:
         doc.add_heading(cat, level=2)
-        if cat == "LotusScript Handle Lifecycle":
-            doc.add_paragraph(
-                "Reference only — not applied to Handle Exhaustion inventory or UI work list."
-            )
         rules = sorted(by_cat[cat], key=lambda x: x[0])
         table = doc.add_table(rows=1 + len(rules), cols=4)
         table.style = "Table Grid"
@@ -620,7 +619,6 @@ def build_code_analysis_rubric_docx() -> bytes:
         hdr[3].text = "What it searches for"
         for i, (rid, meta_r) in enumerate(rules, start=1):
             desc = PROBLEM_BREAKDOWNS.get(rid) or meta_r.get("title") or ""
-            # Strip language suffix if present later — PROBLEM_BREAKDOWNS is plain.
             table.rows[i].cells[0].text = rid
             table.rows[i].cells[1].text = str(meta_r.get("default_severity") or "")
             table.rows[i].cells[2].text = str(meta_r.get("title") or "")
@@ -631,10 +629,6 @@ def build_code_analysis_rubric_docx() -> bytes:
     doc.add_paragraph(
         "Java / SSJS / XPages: assign intermediates, advance collections with a next-handle "
         "variable, release with .recycle() in finally on every path."
-    )
-    doc.add_paragraph(
-        "LotusScript (hygiene reference): Delete Notes* objects (or Call obj.Recycle) before "
-        "re-assignment; Set x = Nothing alone is not enough."
     )
     doc.add_paragraph(
         "ODA (org.openntf.domino): do not manually recycle — framework owns lifecycle."
@@ -662,7 +656,7 @@ def build_code_analysis_rubric_docx() -> bytes:
         "Input: static-rule findings + surrounding code. Verdicts:"
     )
     for line in (
-        "FALSE_POSITIVE — cleanup is clearly present or framework-owned (ODA, helper Delete, etc.).",
+        "FALSE_POSITIVE — cleanup is clearly present or framework-owned (ODA, helper recycle, etc.).",
         "VERIFIED_NON_LOOP — real issue but one-shot / non-loop → demote to LOW hygiene.",
         "VERIFIED — real leak / anti-pattern, especially inside collection loops.",
     ):
@@ -680,7 +674,7 @@ def build_code_analysis_rubric_docx() -> bytes:
 
     doc.add_heading("Pass 3 — Cross-module ownership (DOM-BS-002)", level=2)
     doc.add_paragraph(
-        "Caller/callee contracts across related units: who must Delete/.recycle() when a "
+        "Caller/callee contracts across related Java / SSJS units: who must .recycle() when a "
         "Document is returned or passed. Escalates severity for scheduled/background agents "
         "vs one-shot UI events. Skips elements already covered by deterministic DOM-OWN-001."
     )
