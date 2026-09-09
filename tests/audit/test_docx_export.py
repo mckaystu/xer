@@ -102,8 +102,31 @@ def test_build_checklist_docx_priority_functions():
                 "recycle_call_count": 0,
                 "problem_breakdown": "Allocates in loop without recycle",
                 "remediation_guide": "recycle in finally",
-                "code_snippet_as_is": "var doc = view.getFirstDocument();\nwhile (doc != null) {\n  doc = view.getNextDocument(doc);\n}",
-                "code_snippet_to_be": "Document doc = view.getFirstDocument();\nwhile (doc != null) {\n  Document nextDoc = view.getNextDocument(doc);\n  try {\n    // Process current document\n  } finally {\n    doc.recycle(); // Release native C-API handle\n  }\n  doc = nextDoc;\n}",
+                "code_snippet_as_is": (
+                    "   10 | var doc = view.getFirstDocument();\n"
+                    "   11▶| while (doc != null) {\n"
+                    "   12 |   doc = view.getNextDocument(doc);\n"
+                    "   13 | }"
+                ),
+                "code_snippet_to_be": (
+                    "Document doc = view.getFirstDocument();\n"
+                    "while (doc != null) {\n"
+                    "  Document nextDoc = view.getNextDocument(doc);\n"
+                    "  try {\n"
+                    "    // Process current document\n"
+                    "  } finally {\n"
+                    "    doc.recycle(); // Release native C-API handle\n"
+                    "  }\n"
+                    "  doc = nextDoc;\n"
+                    "}"
+                ),
+                "code_snippet_lines": [
+                    {"line": 10, "text": "var doc = view.getFirstDocument();", "highlight": False},
+                    {"line": 11, "text": "while (doc != null) {", "highlight": True},
+                    {"line": 12, "text": "  doc = view.getNextDocument(doc);", "highlight": False},
+                    {"line": 13, "text": "}", "highlight": False},
+                ],
+                "highlight_line": 11,
             },
             {
                 "function_name": "exportUnprocessed",
@@ -143,3 +166,5 @@ def test_build_checklist_docx_priority_functions():
     assert "Release native C-API handle" not in xml
     assert "Process current document" not in xml
     assert "Notes: " not in xml  # dropped per-item notes lines for brevity
+    # Yellow highlight applied to problem line(s)
+    assert "w:highlight" in xml and 'w:val="yellow"' in xml

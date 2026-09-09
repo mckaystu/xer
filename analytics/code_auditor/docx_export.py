@@ -8,7 +8,7 @@ from datetime import datetime, timezone
 from typing import Any
 
 from docx import Document
-from docx.enum.text import WD_ALIGN_PARAGRAPH
+from docx.enum.text import WD_ALIGN_PARAGRAPH, WD_COLOR_INDEX
 from docx.shared import Inches, Pt, RGBColor
 
 from analytics.code_auditor.context import contributes_to_handle_exhaustion, is_lotusscript_language
@@ -282,16 +282,103 @@ def build_code_audit_checklist_docx(
     return buf.getvalue()
 
 
-def _add_code_block(doc: Document, label: str, code: str, *, limit: int = 1400) -> None:
-    text = _safe(code, limit)
-    if not text:
+def _add_code_block(
+    doc: Document,
+    label: str,
+    code: str,
+    *,
+    lines: list[dict[str, Any]] | None = None,
+    highlight_line: int | None = None,
+    limit: int = 1400,
+) -> None:
+    """Render a bad-code snippet; yellow-highlight the problem line(s)."""
+    structured = _normalize_snippet_lines(lines, code, highlight_line=highlight_line)
+    if not structured:
         return
+
+    highlight_idxs = [i for i, row in enumerate(structured) if row.get("highlight")]
+    focus = highlight_idxs[0] if highlight_idxs else 0
+    kept = structured
+    if sum(len(str(r.get("text") or "")) + 8 for r in structured) > limit:
+        start = max(0, focus - 12)
+        end = min(len(structured), focus + 13)
+        kept = structured[start:end]
+        while sum(len(str(r.get("text") or "")) + 8 for r in kept) > limit and len(kept) > 3:
+            if focus - start >= end - focus - 1 and start < focus:
+                start += 1
+            elif end > focus + 1:
+                end -= 1
+            else:
+                break
+            kept = structured[start:end]
+
     p = doc.add_paragraph()
     p.add_run(label).bold = True
-    code_p = doc.add_paragraph(text)
-    for run in code_p.runs:
+
+    for row in kept:
+        line_no = row.get("line")
+        text = str(row.get("text") or "")
+        prefix = f"{line_no:>6}| " if line_no not in (None, "") else ""
+        line_p = doc.add_paragraph()
+        line_p.paragraph_format.space_before = Pt(0)
+        line_p.paragraph_format.space_after = Pt(0)
+        run = line_p.add_run(f"{prefix}{text}")
         run.font.name = "Consolas"
         run.font.size = Pt(8)
+        if row.get("highlight"):
+            run.font.highlight_color = WD_COLOR_INDEX.YELLOW
+
+
+def _normalize_snippet_lines(
+    lines: list[dict[str, Any]] | None,
+    code: str,
+    *,
+    highlight_line: int | None = None,
+) -> list[dict[str, Any]]:
+    """Build [{line, text, highlight}] from structured lines or raw snippet text."""
+    out: list[dict[str, Any]] = []
+    if lines:
+        for row in lines:
+            if not isinstance(row, dict):
+                continue
+            text = str(row.get("text") or "")
+            abs_line = row.get("line")
+            hit = bool(row.get("highlight"))
+            if highlight_line and abs_line is not None and int(abs_line) == int(highlight_line):
+                hit = True
+            out.append({"line": abs_line, "text": text, "highlight": hit})
+        if out and not any(r["highlight"] for r in out) and highlight_line:
+            for r in out:
+                if r.get("line") is not None and int(r["line"]) == int(highlight_line):
+                    r["highlight"] = True
+        if out:
+            return out
+
+    text = _safe(code, 8000)
+    if not text:
+        return []
+    for raw in text.splitlines():
+        # Numbered UI form: "  3372▶| code" or "  3372 | code"
+        m = re.match(r"^\s*(\d+)\s*([▶>]?)\s*\|\s?(.*)$", raw)
+        if m:
+            abs_line = int(m.group(1))
+            hit = bool(m.group(2)) or (
+                highlight_line is not None and abs_line == int(highlight_line)
+            )
+            out.append({"line": abs_line, "text": m.group(3), "highlight": hit})
+        else:
+            out.append({"line": None, "text": raw, "highlight": False})
+
+    if out and not any(r["highlight"] for r in out):
+        if highlight_line is not None:
+            for r in out:
+                if r.get("line") is not None and int(r["line"]) == int(highlight_line):
+                    r["highlight"] = True
+        if not any(r["highlight"] for r in out) and len(out) <= 3:
+            # Short evidence blob — treat whole block as the problem.
+            for r in out:
+                r["highlight"] = True
+    return out
 
 
 def _add_function_block(doc: Document, idx: int, row: dict[str, Any], report: AuditReport) -> None:
@@ -329,7 +416,37 @@ def _add_function_block(doc: Document, idx: int, row: dict[str, Any], report: Au
 
     # Bad code only — skip generic To-Be templates (duplicated across every row).
     as_is = row.get("code_snippet_as_is") or ""
-    _add_code_block(doc, "Bad code:", as_is, limit=1200)
+    hl = row.get("highlight_line") or row.get("line_number") or row.get("start_line")
+    structured = row.get("code_snippet_lines") if isinstance(row.get("code_snippet_lines"), list) else None
+    if structured and unclean:
+        # Also yellow-mark allocation sites for uncleaned handle vars (not every mention).
+        alloc_re = re.compile(
+            r"(?:=|\bnew\b).*\b("
+            + "|".join(re.escape(str(v)) for v in unclean[:12])
+            + r")\b|"
+            r"\b("
+            + "|".join(re.escape(str(v)) for v in unclean[:12])
+            + r")\b\s*=",
+            re.I,
+        )
+        marked: list[dict[str, Any]] = []
+        for item in structured:
+            if not isinstance(item, dict):
+                continue
+            copy = dict(item)
+            text = str(copy.get("text") or "")
+            if alloc_re.search(text) and not re.search(r"\brecycle\s*\(|\bDelete\b", text, re.I):
+                copy["highlight"] = True
+            marked.append(copy)
+        structured = marked
+    _add_code_block(
+        doc,
+        "Bad code (yellow = problem line):",
+        as_is,
+        lines=structured,
+        highlight_line=int(hl) if hl not in (None, "", 0, "0") else None,
+        limit=1200,
+    )
 
     related = _findings_for_function(report, row)
     if related:
@@ -353,7 +470,15 @@ def _add_finding_condensed(doc: Document, idx: int, f: Finding) -> None:
         f"{f.element_type}:{f.element_name} L{f.line}  ·  conf {f.confidence}%"
     ).font.size = Pt(10)
     bad = f.code_snippet_as_is or f.evidence or ""
-    _add_code_block(doc, "Bad code:", bad, limit=900)
+    hl = f.highlight_line or f.line
+    _add_code_block(
+        doc,
+        "Bad code (yellow = problem line):",
+        bad,
+        lines=f.code_snippet_lines if isinstance(f.code_snippet_lines, list) else None,
+        highlight_line=int(hl) if hl else None,
+        limit=900,
+    )
     doc.add_paragraph()
 
 
