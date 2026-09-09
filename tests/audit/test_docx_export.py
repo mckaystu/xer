@@ -185,4 +185,6 @@ def test_build_code_analysis_rubric_docx():
     assert "Static search rules" in xml or "search rules" in xml.lower()
     assert "LS-DOM" not in xml
     assert "LotusScript Handle Lifecycle" not in xml
-    assert "out of scope: LotusScript" in xml.lower() or "LotusScript is omitted" in xml
+    # No LotusScript language references (lotus.domino Java package name in DOM-005 is OK)
+    assert "LotusScript" not in xml
+    assert "hygiene reference" not in xml.lower()

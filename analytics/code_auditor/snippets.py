@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from typing import Any
 
 from analytics.code_auditor.models import CodeUnit
@@ -1039,17 +1040,64 @@ def extract_line_window(
     focus_line: int,
     base_line: int = 1,
     radius: int = 10,
+    before: int | None = None,
+    after: int | None = None,
+    expand_cleanup_context: bool = True,
+    max_span: int = 120,
 ) -> tuple[str, int, int, int, list[dict[str, Any]]]:
     """
     Return (snippet_text, line_start, line_end, highlight_offset, structured_lines).
 
     Structured lines are friendly for UI highlighting:
       { "line": 3372, "text": "...", "highlight": true }
+
+    Uses a larger window *after* the hit line by default so callers can see
+    ``finally`` / ``.recycle()`` that may clear the finding. When
+    ``expand_cleanup_context`` is set, the window grows downward (within
+    ``max_span``) to include nearby cleanup markers.
     """
     lines = body.splitlines() or [""]
     rel = max(0, min(len(lines) - 1, focus_line - base_line))
-    start_idx = max(0, rel - radius)
-    end_idx = min(len(lines), rel + radius + 1)
+    before_n = radius if before is None else max(0, before)
+    after_n = radius if after is None else max(0, after)
+    # Prefer more context after the allocation so finally/recycle is visible.
+    if after is None and before is None:
+        before_n = max(before_n, 12)
+        after_n = max(after_n, 35)
+
+    start_idx = max(0, rel - before_n)
+    end_idx = min(len(lines), rel + after_n + 1)
+
+    if expand_cleanup_context:
+        cleanup_re = re.compile(
+            r"\bfinally\b|\.recycle\s*\(|\brecycle\s*\(|\bDelete\b",
+            re.I,
+        )
+        # Extend downward to the last cleanup marker within max_span of focus.
+        search_end = min(len(lines), rel + max_span + 1)
+        last_cleanup = -1
+        for i in range(rel, search_end):
+            if cleanup_re.search(lines[i] or ""):
+                last_cleanup = i
+        if last_cleanup >= 0:
+            end_idx = max(end_idx, min(len(lines), last_cleanup + 3))
+        # Also peek a bit upward for an opening try {
+        search_start = max(0, rel - max_span)
+        first_try = -1
+        for i in range(rel, search_start - 1, -1):
+            if re.search(r"\btry\s*\{", lines[i] or "", re.I):
+                first_try = i
+                break
+        if first_try >= 0:
+            start_idx = min(start_idx, first_try)
+
+        # Cap total span
+        if end_idx - start_idx > max_span:
+            # Keep focus in view; prefer keeping more below.
+            start_idx = max(0, min(rel - before_n, end_idx - max_span))
+            if end_idx - start_idx > max_span:
+                end_idx = start_idx + max_span
+
     window = lines[start_idx:end_idx]
 
     numbered: list[str] = []
@@ -1084,7 +1132,10 @@ def attach_snippet_fields(
         unit.body,
         focus_line=focus_line,
         base_line=unit.start_line,
-        radius=10,
+        before=15,
+        after=45,
+        expand_cleanup_context=True,
+        max_span=100,
     )
     as_is = snippet if snippet.strip() else evidence
     looped = body_has_loop(unit.body) if has_loop is None else bool(has_loop)

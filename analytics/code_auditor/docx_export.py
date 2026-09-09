@@ -193,7 +193,7 @@ def build_code_audit_checklist_docx(
     risk_run.font.color.rgb = _sev_color(risk)
 
     doc.add_paragraph(
-        "Scope: Java / SSJS / XPages C-API .recycle(). LotusScript is out of scope. "
+        "Scope: Java / SSJS / XPages C-API .recycle(). "
         "Work the function checklist in order — each item shows the bad code to fix. "
         "Generic recycle patterns live in the Xer UI deep-dive, not repeated here."
     )
@@ -313,14 +313,16 @@ def _add_code_block(
     highlight_idxs = [i for i, row in enumerate(structured) if row.get("highlight")]
     focus = highlight_idxs[0] if highlight_idxs else 0
     kept = structured
+    # Prefer a tall window so finally / recycle below the hit stays visible.
     if sum(len(str(r.get("text") or "")) + 8 for r in structured) > limit:
-        start = max(0, focus - 12)
-        end = min(len(structured), focus + 13)
+        start = max(0, focus - 20)
+        end = min(len(structured), focus + 55)
         kept = structured[start:end]
-        while sum(len(str(r.get("text") or "")) + 8 for r in kept) > limit and len(kept) > 3:
-            if focus - start >= end - focus - 1 and start < focus:
+        while sum(len(str(r.get("text") or "")) + 8 for r in kept) > limit and len(kept) > 8:
+            # Prefer trimming above the hit so cleanup context below remains.
+            if start < focus - 5:
                 start += 1
-            elif end > focus + 1:
+            elif end > focus + 8:
                 end -= 1
             else:
                 break
@@ -455,11 +457,11 @@ def _add_function_block(doc: Document, idx: int, row: dict[str, Any], report: Au
         structured = marked
     _add_code_block(
         doc,
-        "Bad code (yellow = problem line):",
+        "Bad code (yellow = problem line; surrounding lines show try/finally context):",
         as_is,
         lines=structured,
         highlight_line=int(hl) if hl not in (None, "", 0, "0") else None,
-        limit=1200,
+        limit=2800,
     )
 
     related = _findings_for_function(report, row)
@@ -487,11 +489,11 @@ def _add_finding_condensed(doc: Document, idx: int, f: Finding) -> None:
     hl = f.highlight_line or f.line
     _add_code_block(
         doc,
-        "Bad code (yellow = problem line):",
+        "Bad code (yellow = problem line; surrounding lines show try/finally context):",
         bad,
         lines=f.code_snippet_lines if isinstance(f.code_snippet_lines, list) else None,
         highlight_line=int(hl) if hl else None,
-        limit=900,
+        limit=1800,
     )
     doc.add_paragraph()
 
@@ -524,8 +526,8 @@ def build_code_analysis_rubric_docx() -> bytes:
     meta2 = doc.add_paragraph()
     meta2.add_run(
         "This document is the live catalog of static search rules, scoring rubric, and AI "
-        "inference passes for Domino C-API handle exhaustion (Java / SSJS / XPages). "
-        "LotusScript is omitted — it does not share the Java C-API handle-table allocation model."
+        "inference passes for Domino C-API handle exhaustion on Java / SSJS / XPages. "
+        "It is generated from the product rule catalog (not a frozen copy)."
     )
 
     # —— Pipeline ——
@@ -538,12 +540,6 @@ def build_code_analysis_rubric_docx() -> bytes:
         "Apply confidence gate (default XER_AI_CONFIDENCE_MIN=75) and human triage overrides.",
     ):
         doc.add_paragraph(step, style="List Number")
-
-    doc.add_paragraph(
-        "Out of scope: LotusScript. LS object lifetimes do not create the same native C-API "
-        "handle-table exhaustion risk as Java/SSJS .recycle() leaks, so LotusScript rules are "
-        "not part of this rubric or the Handle Exhaustion work list."
-    )
 
     # —— Rubric / scoring ——
     doc.add_heading("2. Scoring rubric", level=1)

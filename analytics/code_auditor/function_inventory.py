@@ -469,15 +469,29 @@ def _attach_inventory_snippets(
         disp_idx = 0
     highlight_line = start_line + display_body.count("\n", 0, disp_idx)
 
-    # Prefer a generous window so the full function is readable; fall back to ±25
+    # Show enough of the function that a finally / recycle below the hit is visible.
     line_count = max(1, display_body.count("\n") + 1)
-    radius = 40 if line_count <= 90 else 25
-    snippet, line_start, line_end, _hl, structured = extract_line_window(
-        display_body,
-        focus_line=highlight_line,
-        base_line=start_line,
-        radius=radius,
-    )
+    if line_count <= 100:
+        # Entire function when reasonably sized — removes "is there a finally?" ambiguity.
+        snippet, line_start, line_end, _hl, structured = extract_line_window(
+            display_body,
+            focus_line=highlight_line,
+            base_line=start_line,
+            before=line_count,
+            after=line_count,
+            expand_cleanup_context=False,
+            max_span=max(line_count, 20),
+        )
+    else:
+        snippet, line_start, line_end, _hl, structured = extract_line_window(
+            display_body,
+            focus_line=highlight_line,
+            base_line=start_line,
+            before=20,
+            after=50,
+            expand_cleanup_context=True,
+            max_span=120,
+        )
     problem, guide, warning, to_be = _inventory_guides(
         status, language, function_name, in_loop=in_loop, unclean_vars=unclean_vars
     )
