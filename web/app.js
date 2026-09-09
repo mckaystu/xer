@@ -101,7 +101,8 @@ let currentSummary = null;
 let currentAnalysis = null;
 let currentCodeAudit = null;
 let currentFunctionInventory = null;
-let auditFindingFilter = "all"; // all | verified | false_positive | blind_spot | handle | performance | ai_discovered
+let auditFindingFilter = "all"; // all | verified | false_positive | blind_spot | handle | performance | ai_discovered | high_confidence
+const AI_CONFIDENCE_MIN_UI = 75; // mirrors default XER_AI_CONFIDENCE_MIN
 let findingsPage = 0;
 const FINDINGS_PAGE_SIZE = 25;
 let inventoryListFilter = "actionable"; // actionable | unprotected | partial | all | fp | safe
@@ -1409,6 +1410,12 @@ function wireInventoryDeepDive() {
   });
 }
 
+function findingConfidencePct(f) {
+  const c = f?.confidence;
+  if (typeof c !== "number" || Number.isNaN(c)) return null;
+  return c <= 1 ? Math.round(c * 100) : Math.round(c);
+}
+
 function findingFilterBucket(f) {
   if (f.is_blind_spot || f.ai_validation_status === "BLIND_SPOT" || String(f.rule_id || "").startsWith("DOM-BS")) {
     return "blind_spot";
@@ -1466,6 +1473,10 @@ function filterAuditFindings(findings, filter) {
       if (filter === "ownership") return cat === "ownership" && !f.is_false_positive;
       if (filter === "security") return cat === "security" && !f.is_false_positive;
       if (filter === "ai_discovered") return cat === "ai" || bucket === "blind_spot";
+      if (filter === "high_confidence") {
+        const pct = findingConfidencePct(f);
+        return pct != null && pct >= AI_CONFIDENCE_MIN_UI && !f.is_false_positive;
+      }
       return true;
     });
 }
@@ -1482,6 +1493,9 @@ function aiValidationBanner(finding) {
   } else if (status === "BLIND_SPOT" || finding.is_blind_spot) {
     title = "AI Validation Note — Blind Spot Discovered";
     cls += " ai-note-blind";
+  } else if (status === "LOW_CONFIDENCE") {
+    title = "AI Validation Note — Below confidence threshold";
+    cls += " ai-note-fp";
   } else if (status === "VERIFIED_NON_LOOP") {
     title = "AI Validation Note — Verified (Non-Loop Hygiene)";
     cls += " ai-note-verified";
@@ -1556,6 +1570,10 @@ function renderCodeAuditCard(audit) {
   const aiCatCount = findings.filter(
     (f) => findingCategoryBucket(f) === "ai" || findingFilterBucket(f) === "blind_spot"
   ).length;
+  const highConfCount = findings.filter((f) => {
+    const pct = findingConfidencePct(f);
+    return pct != null && pct >= AI_CONFIDENCE_MIN_UI && !f.is_false_positive;
+  }).length;
 
   return `
     <details class="findings-panel" id="findingsPanelDetails" ${findingsPanelOpen ? "open" : ""}>
@@ -1569,9 +1587,10 @@ function renderCodeAuditCard(audit) {
       <div class="score-card ${riskClass}">
         <div class="score-copy" style="margin-bottom:12px">
           <p class="score-rating">Handle Exhaustion Risk: ${escapeHtml(risk)}</p>
-          <p class="score-hint">Use the inventory above as the work list. This panel is rule evidence (PERF/SEC/ownership/AI). Prefer opening a function row — related findings appear in its deep-dive.</p>
+          <p class="score-hint">Use the inventory above as the work list. This panel is rule evidence (PERF/SEC/ownership/AI). Prefer opening a function row — related findings appear in its deep-dive. AI acts only at confidence ≥ ${AI_CONFIDENCE_MIN_UI}%.</p>
           <div class="findings-filter-bar" role="toolbar" aria-label="Category filters">
             ${filterBtn("all", "All Findings", findings.length)}
+            ${filterBtn("high_confidence", `Conf ≥ ${AI_CONFIDENCE_MIN_UI}%`, highConfCount)}
             ${filterBtn("handle", "Handle Exhaustion (Java/JS)", handleCount)}
             ${filterBtn("ownership", "Ownership", ownershipCount)}
             ${filterBtn("performance", "Performance & NIF", perfCount)}

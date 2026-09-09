@@ -54,6 +54,7 @@ Return ONLY valid JSON:
 }
 Be conservative: only mark FALSE_POSITIVE when cleanup is clearly present or framework-owned.
 Use VERIFIED_NON_LOOP when the un-deleted handle is clearly outside any iteration loop.
+Include an honest confidence (0-100); the host discards reviews below its confidence threshold.
 """
 
 NON_LOOP_AI_NOTE = (
@@ -90,7 +91,7 @@ Return ONLY valid JSON:
   ]
 }
 If the code is genuinely safe, return {"blind_spots": []}.
-Only report high-confidence real leaks (prefer confidence >= 75).
+Only report high-confidence real leaks (prefer confidence at or above the host threshold, typically 75).
 """
 
 PASS3_SYSTEM_PROMPT = """You are a Domino architecture expert performing CROSS-MODULE handle ownership
@@ -131,7 +132,7 @@ Return ONLY valid JSON:
   ]
 }
 If nothing to report: {"ownership_gaps": [], "severity_adjustments": []}.
-Prefer confidence >= 75 for ownership_gaps.
+Prefer confidence at or above the host threshold (typically 75) for ownership_gaps.
 """
 
 INVENTORY_FP_SYSTEM_PROMPT = """You are a Domino architecture expert reviewing Function & Recycle
@@ -158,7 +159,33 @@ Return ONLY valid JSON:
   ]
 }
 Be conservative on FALSE_POSITIVE — only when cleanup ownership or framework lifecycle is clear.
+Include an honest confidence (0-100); low-confidence reviews are discarded by the host.
 """
+
+
+DEFAULT_AI_CONFIDENCE_MIN = 75
+
+
+def ai_confidence_min() -> int:
+    """Minimum AI confidence (0-100) required to act on a model verdict.
+
+    Controlled by ``XER_AI_CONFIDENCE_MIN`` (default 75). Below this, Pass 1 / inventory
+    verdicts are ignored and Pass 2/3 discoveries are dropped.
+    """
+    raw = os.getenv("XER_AI_CONFIDENCE_MIN", str(DEFAULT_AI_CONFIDENCE_MIN)).strip()
+    try:
+        value = int(raw)
+    except ValueError:
+        return DEFAULT_AI_CONFIDENCE_MIN
+    return max(0, min(100, value))
+
+
+def _parse_confidence(raw: Any, default: int = 70) -> int:
+    try:
+        confidence = int(raw)
+    except (TypeError, ValueError):
+        confidence = default
+    return max(0, min(100, confidence))
 
 
 def llm_available() -> bool:
@@ -216,6 +243,8 @@ def _pass1_false_positive_filter(
     ranked_keys = sorted(by_unit.keys(), key=lambda k: -len(by_unit[k]))[:max_units]
     reviewed = 0
     fps = 0
+    skipped_low = 0
+    min_conf = ai_confidence_min()
 
     for key in ranked_keys:
         unit = unit_map.get(key)
@@ -263,7 +292,18 @@ def _pass1_false_positive_filter(
                 continue
             verdict = str(review.get("verdict") or "VERIFIED").upper().strip()
             reasoning = str(review.get("reasoning") or "").strip()
+            confidence = _parse_confidence(review.get("confidence"), default=70)
             reviewed += 1
+            if confidence < min_conf:
+                skipped_low += 1
+                # Soft note only — do not change FP / severity on low-confidence AI opinions
+                if not finding.ai_validation_status:
+                    finding.ai_validation_status = "LOW_CONFIDENCE"
+                    finding.ai_validation_reasoning = (
+                        f"AI confidence {confidence}% below threshold {min_conf}% — "
+                        f"ignored ({verdict}). {reasoning}"
+                    ).strip()
+                continue
             if verdict == "FALSE_POSITIVE":
                 finding.ai_validation_status = "FALSE_POSITIVE"
                 finding.ai_validation_reasoning = reasoning or (
@@ -273,7 +313,7 @@ def _pass1_false_positive_filter(
                 finding.is_blind_spot = False
                 finding.engine = "hybrid"
                 finding.severity = "LOW"  # demote — retained for UI "Flagged False Positives"
-                finding.confidence = min(finding.confidence, 40)
+                finding.confidence = min(finding.confidence, max(40, 100 - confidence))
                 fps += 1
             elif verdict in {"VERIFIED_NON_LOOP", "NON_LOOP", "VERIFIED_HYGIENE"}:
                 finding.ai_validation_status = "VERIFIED_NON_LOOP"
@@ -285,7 +325,7 @@ def _pass1_false_positive_filter(
                 finding.is_blind_spot = False
                 finding.engine = "hybrid"
                 finding.severity = "LOW"
-                finding.confidence = max(finding.confidence, 70)
+                finding.confidence = max(finding.confidence, confidence)
                 if note not in (finding.technical_impact or ""):
                     finding.technical_impact = (
                         (finding.technical_impact or "").rstrip() + " " + note
@@ -301,6 +341,7 @@ def _pass1_false_positive_filter(
                 )
                 finding.is_false_positive = False
                 finding.engine = "hybrid" if finding.engine == "rules" else finding.engine
+                finding.confidence = max(finding.confidence, confidence)
                 # If model reports in_loop=false but verdict VERIFIED, still demote gently
                 if review.get("in_loop") is False and finding.severity in {
                     "CRITICAL",
@@ -316,7 +357,8 @@ def _pass1_false_positive_filter(
 
     notes.append(
         f"AI Pass 1 (false-positive filter): reviewed {reviewed} finding(s), "
-        f"flagged {fps} false positive(s)."
+        f"flagged {fps} false positive(s)"
+        + (f", skipped {skipped_low} below confidence {ai_confidence_min()}%." if skipped_low else ".")
     )
 
 
@@ -358,12 +400,8 @@ def _pass2_blind_spot_detector(
             continue
 
         for raw in payload.get("blind_spots") or []:
-            try:
-                confidence = int(raw.get("confidence") or 70)
-            except (TypeError, ValueError):
-                confidence = 70
-            confidence = max(0, min(100, confidence))
-            if confidence < 75:
+            confidence = _parse_confidence(raw.get("confidence"), default=70)
+            if confidence < ai_confidence_min():
                 continue
             severity = str(raw.get("severity") or meta["default_severity"]).upper()
             if severity not in {"CRITICAL", "HIGH", "MEDIUM", "LOW"}:
@@ -502,12 +540,8 @@ def _pass3_cross_module_ownership(
     }
     new_findings: list[Finding] = []
     for raw in result.get("ownership_gaps") or []:
-        try:
-            confidence = int(raw.get("confidence") or 70)
-        except (TypeError, ValueError):
-            confidence = 70
-        confidence = max(0, min(100, confidence))
-        if confidence < 75:
+        confidence = _parse_confidence(raw.get("confidence"), default=70)
+        if confidence < ai_confidence_min():
             continue
         severity = str(raw.get("severity") or meta["default_severity"]).upper()
         if severity not in {"CRITICAL", "HIGH", "MEDIUM", "LOW"}:
@@ -605,6 +639,7 @@ def enrich_with_llm(
 
     notes.append(
         f"AI discrepancy audit enabled (model={model_name}, "
+        f"confidence≥{ai_confidence_min()}%, "
         f"pass1≤{pass1_budget}, pass2≤{pass2_budget}, pass3≤{pass3_budget})."
     )
 
@@ -677,6 +712,8 @@ def enrich_inventory_with_llm(
     # Batch in chunks of 8 to keep prompts small
     reviewed = 0
     fps = 0
+    skipped_low = 0
+    min_conf = ai_confidence_min()
     chunk_size = 8
     for i in range(0, len(selected), chunk_size):
         batch = selected[i : i + chunk_size]
@@ -712,7 +749,17 @@ def enrich_inventory_with_llm(
                 continue
             verdict = str(review.get("verdict") or "VERIFIED").upper().strip()
             reasoning = str(review.get("reasoning") or "").strip()
+            confidence = _parse_confidence(review.get("confidence"), default=70)
             reviewed += 1
+            if confidence < min_conf:
+                skipped_low += 1
+                if not rec.ai_validation_status:
+                    rec.ai_validation_status = "LOW_CONFIDENCE"
+                    rec.ai_validation_reasoning = (
+                        f"AI confidence {confidence}% below threshold {min_conf}% — "
+                        f"ignored ({verdict}). {reasoning}"
+                    ).strip()
+                continue
             if verdict == "FALSE_POSITIVE":
                 rec.ai_validation_status = "FALSE_POSITIVE"
                 rec.ai_validation_reasoning = reasoning or (
@@ -739,7 +786,8 @@ def enrich_inventory_with_llm(
                 rec.triage_source = "ai"
 
     notes.append(
-        f"AI inventory FP review: reviewed {reviewed} function(s), flagged {fps} false positive(s)."
+        f"AI inventory FP review: reviewed {reviewed} function(s), flagged {fps} false positive(s)"
+        + (f", skipped {skipped_low} below confidence {min_conf}%." if skipped_low else ".")
     )
     return records, notes
 

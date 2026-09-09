@@ -160,9 +160,11 @@ Formula units are extracted from DXL/graph for a **separate** quality track (not
 
 ## AI discrepancy audit (`--llm`)
 
-Requires `OPENAI_API_KEY` (optional `XER_AUDIT_MODEL`). Implemented in `llm_engine.py`.
+Requires `OPENAI_API_KEY` (optional `XER_AUDIT_MODEL`, `XER_AI_CONFIDENCE_MIN` default **75**). Implemented in `llm_engine.py`.
 
 AI runs **automatically** whenever Code Analysis is computed (DXL upload, cache miss, or **Refresh analysis**), not as a separate button. Cached reloads stay fast.
+
+**Confidence gate:** AI FP marks, blind spots, and ownership findings only apply when model confidence ≥ `XER_AI_CONFIDENCE_MIN` (default 75). Below that, Pass 1 notes `LOW_CONFIDENCE` without changing severity/FP. UI filter **Conf ≥ 75%** surfaces actionable high-confidence rows.
 
 | Pass | Role |
 |------|------|
