@@ -229,6 +229,31 @@ RULE_CATALOG: dict[str, dict[str, str]] = {
         "category": "Formula Quality",
         "default_severity": "HIGH",
     },
+    "FORM-004": {
+        "title": "Summary Field Budget Risk (32KB Limit)",
+        "category": "Design & Data Integrity",
+        "default_severity": "HIGH",
+    },
+    "EXT-001": {
+        "title": "JDBC / DB2 Connection Opened Without Close",
+        "category": "External Resource Leaks",
+        "default_severity": "HIGH",
+    },
+    "EXT-002": {
+        "title": "HTTP / URL Connection Not Closed",
+        "category": "External Resource Leaks",
+        "default_severity": "HIGH",
+    },
+    "LS-EXT-001": {
+        "title": "LotusScript JavaSession Not Released",
+        "category": "External Resource Leaks",
+        "default_severity": "HIGH",
+    },
+    "LS-EXT-002": {
+        "title": "LotusScript OpenConnection Without Close",
+        "category": "External Resource Leaks",
+        "default_severity": "HIGH",
+    },
 }
 
 

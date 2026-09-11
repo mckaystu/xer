@@ -39,6 +39,9 @@ PREFILTER_KEYWORDS: list[tuple[str, re.Pattern[str]]] = [
     ("Factory", re.compile(r"Factory\.fromLotus", re.I)),
     ("DbLookup", re.compile(r"@Db(?:Lookup|Column)\b", re.I)),
     ("formula_loop", re.compile(r"@(?:While|For)\b", re.I)),
+    ("Connection", re.compile(r"\b(?:getConnection|OpenConnection|DriverManager|JavaSession)\b", re.I)),
+    ("HTTPRequest", re.compile(r"\b(?:NotesHTTPRequest|createHTTPRequest|HttpURLConnection)\b", re.I)),
+    ("IsSummary", re.compile(r"\bIsSummary\b", re.I)),
 ]
 
 

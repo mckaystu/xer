@@ -1380,8 +1380,16 @@ def run_rule_engine(
     graph: dict | None = None,
     edges: list | None = None,
 ) -> list[Finding]:
-    from analytics.code_auditor.form_rules import FORM_DETECTORS
+    from analytics.code_auditor.ext_rules import EXT_DETECTORS
+    from analytics.code_auditor.ext_rules import bind_helpers as bind_ext
+    from analytics.code_auditor.form_rules import (
+        FORM_DETECTORS,
+        detect_form004,
+        detect_form004_from_graph,
+    )
     from analytics.code_auditor.form_rules import bind_helpers as bind_form
+    from analytics.code_auditor.ls_ext_rules import LS_EXT_DETECTORS
+    from analytics.code_auditor.ls_ext_rules import bind_helpers as bind_ls_ext
     from analytics.code_auditor.ownership_rules import bind_helpers as bind_own
     from analytics.code_auditor.ownership_rules import run_ownership_detectors
     from analytics.code_auditor.perf_rules import PERF_DETECTORS
@@ -1391,18 +1399,24 @@ def run_rule_engine(
 
     unit_list = list(units)
     # LS-DOM-* detectors are not wired: LotusScript does not share Java C-API handle exhaustion.
+    # LS-EXT-* are a narrow exception (JavaSession / OpenConnection).
     bind_perf(finding=_finding, line_of=_line_of, snippet=_snippet)
     bind_sec(finding=_finding, line_of=_line_of, snippet=_snippet)
     bind_form(finding=_finding, line_of=_line_of, snippet=_snippet)
     bind_own(finding=_finding, line_of=_line_of, snippet=_snippet)
+    bind_ext(finding=_finding, line_of=_line_of, snippet=_snippet)
+    bind_ls_ext(finding=_finding, line_of=_line_of, snippet=_snippet)
 
     findings: list[Finding] = []
     for unit in unit_list:
-        # Code Analysis / Handle Exhaustion scope: Java / SSJS / XPages only.
-        # LotusScript units are skipped entirely (no DOM / PERF / SEC / FORM on LS).
+        # Narrow LotusScript exception: external bridge / DB2 connection leaks only.
         if is_lotusscript_language(unit.language):
+            for detector in LS_EXT_DETECTORS:
+                findings.extend(detector(unit))
+            # Summary-flag antipatterns appear in LS agents too (32KB assessment findings).
+            findings.extend(detect_form004(unit))
             continue
-        # CSJS is browser-side — not C-API handle exhaustion
+        # CSJS is browser-side — not C-API handle exhaustion / server JDBC
         if is_client_javascript(
             unit.language, event=unit.event, element_name=unit.element_name
         ):
@@ -1415,10 +1429,20 @@ def run_rule_engine(
             findings.extend(detector(unit))
         for detector in FORM_DETECTORS:
             findings.extend(detector(unit))
+        for detector in EXT_DETECTORS:
+            findings.extend(detector(unit))
+    # Design-time summary-field budget (graph forms)
+    findings.extend(detect_form004_from_graph(graph))
     # Cross-unit / cross-library ownership (needs full set + optional graph edges)
     findings.extend(run_ownership_detectors(unit_list, graph=graph, edges=edges))
-    # Hard filter: never surface LotusScript findings in this auditor
-    findings = [f for f in findings if not is_lotusscript_language(f.language)]
+    # Hard filter: never surface LotusScript C-API findings — allow LS-EXT-* and FORM-004.
+    findings = [
+        f
+        for f in findings
+        if (not is_lotusscript_language(f.language))
+        or (f.rule_id or "").startswith("LS-EXT-")
+        or (f.rule_id or "") == "FORM-004"
+    ]
     # Assign stable IDs
     for idx, finding in enumerate(findings, start=1):
         finding.id = f"F-{idx:03d}"

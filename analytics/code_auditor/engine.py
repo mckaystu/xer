@@ -66,7 +66,13 @@ def run_audit(
             llm_units, findings, max_units=max_llm_units, model=model
         )
         notes.extend(llm_notes)
-        findings = [f for f in findings if not is_lotusscript_language(f.language)]
+        findings = [
+            f
+            for f in findings
+            if (not is_lotusscript_language(f.language))
+            or (f.rule_id or "").startswith("LS-EXT-")
+            or (f.rule_id or "") == "FORM-004"
+        ]
     else:
         notes.append("Rules-only mode (set OPENAI_API_KEY and pass --llm to enable AI enrichment).")
 

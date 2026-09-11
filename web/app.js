@@ -1593,13 +1593,16 @@ function findingCategoryBucket(f) {
   if (rid.startsWith("PERF-") || cat.includes("Performance") || cat.includes("NIF")) {
     return "performance";
   }
-  if (rid.startsWith("FORM-") || cat.includes("Formula")) {
+  if (rid.startsWith("FORM-") || cat.includes("Formula") || cat.includes("Design & Data")) {
     return "formula";
   }
   if (rid.startsWith("SEC-") || cat.includes("Security")) {
     return "security";
   }
-  // LotusScript is out of scope for C-API Handle Exhaustion (DOM-*)
+  if (rid.startsWith("EXT-") || rid.startsWith("LS-EXT") || cat.includes("External Resource")) {
+    return "external";
+  }
+  // LotusScript is out of scope for C-API Handle Exhaustion (DOM-*) — except LS-EXT above
   if (isLotus || rid.startsWith("LS-DOM")) {
     return "other";
   }
@@ -1628,6 +1631,7 @@ function filterAuditFindings(findings, filter) {
       if (filter === "formula") return cat === "formula" && !f.is_false_positive;
       if (filter === "ownership") return cat === "ownership" && !f.is_false_positive;
       if (filter === "security") return cat === "security" && !f.is_false_positive;
+      if (filter === "external") return cat === "external" && !f.is_false_positive;
       if (filter === "ai_discovered") return cat === "ai" || bucket === "blind_spot";
       if (filter === "high_confidence") {
         const pct = findingConfidencePct(f);
@@ -1721,6 +1725,7 @@ function renderCodeAuditCard(audit) {
   const formulaCount = findings.filter((f) => findingCategoryBucket(f) === "formula" && !f.is_false_positive).length;
   const ownershipCount = findings.filter((f) => findingCategoryBucket(f) === "ownership" && !f.is_false_positive).length;
   const securityCount = findings.filter((f) => findingCategoryBucket(f) === "security" && !f.is_false_positive).length;
+  const externalCount = findings.filter((f) => findingCategoryBucket(f) === "external" && !f.is_false_positive).length;
   const aiCatCount = findings.filter(
     (f) => findingCategoryBucket(f) === "ai" || findingFilterBucket(f) === "blind_spot"
   ).length;
@@ -1748,8 +1753,9 @@ function renderCodeAuditCard(audit) {
             ${filterBtn("handle", "Handle Exhaustion (Java/JS)", handleCount)}
             ${filterBtn("ownership", "Ownership", ownershipCount)}
             ${filterBtn("performance", "Performance & NIF", perfCount)}
-            ${filterBtn("formula", "Formula", formulaCount)}
+            ${filterBtn("formula", "Formula / Design", formulaCount)}
             ${filterBtn("security", "Security", securityCount)}
+            ${filterBtn("external", "External Resources", externalCount)}
             ${filterBtn("ai_discovered", "AI Discovered", aiCatCount)}
           </div>
           <div class="findings-filter-bar" role="toolbar" aria-label="AI validation filters">

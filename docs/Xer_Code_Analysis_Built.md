@@ -96,6 +96,23 @@ are **omitted from the Download rules & rubric** Word guide.
 | PERF-003 | Unbatched `doc.save` / `Save` per iteration |
 | PERF-004 | O(n²) `GetNthDocument` / `GetNthEntry` iteration |
 
+### External resources (`EXT-*`, `LS-EXT-*`)
+
+| ID | Focus |
+|----|--------|
+| EXT-001 | JDBC / DB2 connection opened without `close()` |
+| EXT-002 | HTTP / URL connection or stream not closed |
+| LS-EXT-001 | LotusScript `JavaSession` not released (`Set … = Nothing`) |
+| LS-EXT-002 | LotusScript `OpenConnection` without `CloseConnection` |
+
+LotusScript remains out of scope for C-API handle exhaustion; **LS-EXT-*** is a narrow exception for bridge/DB connection leaks seen in Domino application assessments.
+
+### Design integrity (`FORM-004`)
+
+| ID | Focus |
+|----|--------|
+| FORM-004 | Summary-field budget risk (32KB limit) — dense forms, `IsSummary=True`, many item writes |
+
 ### Security (`SEC-001`, `SEC-002`)
 
 | ID | Focus |

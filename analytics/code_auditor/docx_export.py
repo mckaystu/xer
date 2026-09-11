@@ -122,11 +122,13 @@ def _priority_findings(report: AuditReport, *, limit: int = 40) -> list[Finding]
     for f in report.findings:
         if f.is_false_positive:
             continue
-        if is_lotusscript_language(f.language):
+        if is_lotusscript_language(f.language) and not (
+            (f.rule_id or "").startswith("LS-EXT-") or (f.rule_id or "") == "FORM-004"
+        ):
             continue
         rid = f.rule_id or ""
         if contributes_to_handle_exhaustion(f) or rid.startswith(
-            ("DOM-", "PERF-", "SEC-", "FORM-", "DOM-OWN", "DOM-BS")
+            ("DOM-", "PERF-", "SEC-", "FORM-", "EXT-", "LS-EXT", "DOM-OWN", "DOM-BS")
         ):
             out.append(f)
     out.sort(key=_finding_sort_key)
@@ -634,11 +636,13 @@ def build_code_analysis_rubric_docx() -> bytes:
 
     by_cat: dict[str, list[tuple[str, dict[str, str]]]] = defaultdict(list)
     for rid, meta_r in RULE_CATALOG.items():
-        # Omit LotusScript — not a C-API handle-table exhaustion concern.
+        # Omit LotusScript C-API lifecycle rules — keep LS-EXT-* external resource rules.
         if rid.startswith("LS-DOM") or (meta_r.get("category") or "") == "LotusScript Handle Lifecycle":
             continue
-        # Omit Formula Quality — @DbLookup / secrets are not Domino object-handle issues.
-        if rid.startswith("FORM-") or (meta_r.get("category") or "") == "Formula Quality":
+        # Omit Formula Quality (@DbLookup / secrets) — keep FORM-004 design integrity.
+        if rid in {"FORM-001", "FORM-002", "FORM-003"} or (
+            (meta_r.get("category") or "") == "Formula Quality"
+        ):
             continue
         by_cat[meta_r.get("category") or "Other"].append((rid, meta_r))
 
@@ -649,6 +653,8 @@ def build_code_analysis_rubric_docx() -> bytes:
         "Static Variables & Lifetime Anti-Patterns",
         "High-Memory & Expensive Data Patterns",
         "Performance & NIF Indexing",
+        "External Resource Leaks",
+        "Design & Data Integrity",
         "Application Security",
         "AI Discrepancy & Blind Spots",
     ]

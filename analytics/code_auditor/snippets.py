@@ -174,6 +174,25 @@ PROBLEM_BREAKDOWNS: dict[str, str] = {
     "FORM-003": (
         "Formula embeds a credential-like literal or plaintext http:// endpoint."
     ),
+    "FORM-004": (
+        "Form or code risks exceeding Domino's document summary limit (~32KB): too many "
+        "summary-eligible fields, IsSummary=True on large items, or many ReplaceItemValue "
+        "writes without clearing the summary flag."
+    ),
+    "EXT-001": (
+        "JDBC/DB2 Connection (getConnection / OpenConnection) is opened without .close() "
+        "in finally — external pool exhaustion."
+    ),
+    "EXT-002": (
+        "NotesHTTPRequest / HttpURLConnection / response stream acquired without "
+        "close/disconnect — socket and stream leaks under load."
+    ),
+    "LS-EXT-001": (
+        "LotusScript JavaSession created without Set … = Nothing / Close — LS→JVM bridge leak."
+    ),
+    "LS-EXT-002": (
+        "LotusScript OpenConnection / SetTheConnection without CloseConnection — DB2/ODBC leak."
+    ),
     "SEC-001": (
         "A password or secret is hardcoded in source and used with an http:// endpoint, exposing "
         "credentials in cleartext."
@@ -351,6 +370,60 @@ REMEDIATION_GUIDES: dict[str, dict[str, str]] = {
         "formula": "Remove hardcoded secrets; use HTTPS endpoints only.",
         "lotusscript": "Remove hardcoded secrets; use HTTPS endpoints only.",
         "java": "Remove hardcoded secrets; use HTTPS endpoints only.",
+    },
+    "FORM-004": {
+        "java": (
+            "After writing large text: item.setSummary(false). Prefer RichText for bulky "
+            "content; only keep IsSummary on fields used in views/search."
+        ),
+        "lotusscript": (
+            "After ReplaceItemValue on large text: item.IsSummary = False. Prefer Rich Text "
+            "items; audit form fields that are not needed in views."
+        ),
+        "formula": (
+            "Reduce summary-eligible fields on the form; move bulky data to Rich Text; "
+            "optional server stopgap NSF_LargeSummary=1."
+        ),
+    },
+    "EXT-001": {
+        "java": (
+            "Connection conn = null;\n"
+            "try {\n"
+            "  conn = DriverManager.getConnection(url, user, pass);\n"
+            "  // work\n"
+            "} finally {\n"
+            "  if (conn != null) try { conn.close(); } catch (Exception ignore) {}\n"
+            "}"
+        ),
+    },
+    "EXT-002": {
+        "java": (
+            "NotesHTTPRequest http = null;\n"
+            "try {\n"
+            "  http = session.createHTTPRequest();\n"
+            "  // GET / read body\n"
+            "} finally {\n"
+            "  if (http != null) http.close();\n"
+            "}"
+        ),
+    },
+    "LS-EXT-001": {
+        "lotusscript": (
+            "Dim js As JavaSession\n"
+            "Set js = New JavaSession\n"
+            "' … Java calls …\n"
+            "Set js = Nothing"
+        ),
+    },
+    "LS-EXT-002": {
+        "lotusscript": (
+            "Call libDB2.OpenConnection(...)\n"
+            "On Error GoTo Done\n"
+            "' … work …\n"
+            "Done:\n"
+            "Call libDB2.CloseConnection()\n"
+            "Exit Sub"
+        ),
     },
     "SEC-001": {
         "lotusscript": "Store credentials outside source (env/secret store); call https:// endpoints only.",

@@ -50,6 +50,19 @@ RE_SECRET = re.compile(
 )
 RE_HTTP = re.compile(r"(?i)https?://[^\s\"']+")
 
+# Forms with this many non-richtext fields risk the 32KB summary limit.
+SUMMARY_FIELD_WARN_THRESHOLD = 45
+
+RE_ISSUMMARY_TRUE = re.compile(
+    r"""(?:\b(?:IsSummary|issummary)\s*(?:=|:=)\s*(?:True|true|TRUE)\b)"""
+    r"""|(?:\.\s*setSummary\s*\(\s*true\s*\))""",
+    re.I | re.X,
+)
+RE_REPLACE_LARGE = re.compile(
+    r"""\.(?:ReplaceItemValue|replaceItemValue|AppendItemValue)\s*\(\s*[\"'][^\"']+[\"']\s*,""",
+    re.I,
+)
+
 
 def _is_formula(unit: CodeUnit) -> bool:
     return (unit.language or "").lower() == "formula"
@@ -152,6 +165,135 @@ def detect_form003(unit: CodeUnit) -> list[Finding]:
     return findings
 
 
-FORM_DETECTORS = [detect_form001, detect_form002, detect_form003]
+def detect_form004(unit: CodeUnit) -> list[Finding]:
+    """Code that forces items to stay summary (32KB summary-limit risk)."""
+    lang = (unit.language or "").lower()
+    if lang == "formula":
+        return []
+    body = unit.body or ""
+    findings: list[Finding] = []
+    for match in RE_ISSUMMARY_TRUE.finditer(body):
+        line = _line_of(body, match.start(), unit.start_line)
+        findings.append(
+            _finding(
+                "FORM-004",
+                unit,
+                line=line,
+                evidence=_snippet(body, match.start()),
+                confidence=82,
+                impact=(
+                    "Code sets IsSummary = True. Summary fields count toward the Domino "
+                    "document summary limit (~32KB, or larger with NSF_LargeSummary). "
+                    "Oversized summary data prevents documents from opening or updating views."
+                ),
+                remediation=(
+                    "Only mark fields summary when they appear in views/search. "
+                    "For large text, set IsSummary = False (or use Rich Text / attachments)."
+                ),
+                action="Avoid forcing IsSummary=True on large or multi-value text items.",
+            )
+        )
+    # Heuristic: many ReplaceItemValue calls without any IsSummary = False nearby
+    replaces = list(RE_REPLACE_LARGE.finditer(body))
+    if len(replaces) >= 8 and not re.search(r"IsSummary\s*(?:=|:=)\s*False", body, re.I):
+        line = _line_of(body, replaces[0].start(), unit.start_line)
+        findings.append(
+            _finding(
+                "FORM-004",
+                unit,
+                line=line,
+                evidence=_snippet(body, replaces[0].start()),
+                confidence=70,
+                impact=(
+                    f"Routine writes {len(replaces)} items via ReplaceItemValue/AppendItemValue "
+                    "without setting IsSummary = False. Default summary flags can push documents "
+                    "over the 32KB summary limit (Dealer Lookup / IDM-style failures)."
+                ),
+                remediation=(
+                    "After writing large text items: item.IsSummary = False (LS) or "
+                    "item.setSummary(false) (Java). Prefer Rich Text for bulky content."
+                ),
+                action="Clear summary flag on large items that are not needed in views.",
+            )
+        )
+    return findings
 
-__all__ = ["FORM_DETECTORS", "bind_helpers", "detect_form001", "detect_form002", "detect_form003"]
+
+def detect_form004_from_graph(graph: dict | None) -> list[Finding]:
+    """Flag forms whose field inventory suggests summary-budget pressure."""
+    if not graph:
+        return []
+    from analytics.code_auditor.models import CodeUnit
+
+    de = graph.get("design_elements") or {}
+    forms = list(de.get("forms") or []) + list(de.get("subforms") or [])
+    out: list[Finding] = []
+    for form in forms:
+        if not isinstance(form, dict):
+            continue
+        name = form.get("name") or "unknown"
+        fields = form.get("fields") or []
+        if not isinstance(fields, list):
+            continue
+        summary_eligible = []
+        for fld in fields:
+            if not isinstance(fld, dict):
+                continue
+            ftype = (fld.get("type") or "").lower()
+            fname = fld.get("name") or ""
+            if not fname or fname.startswith("$"):
+                continue
+            if ftype in {"richtext", "rich text", "authors", "readers", "password"}:
+                continue
+            summary_eligible.append(fname)
+        if len(summary_eligible) < SUMMARY_FIELD_WARN_THRESHOLD:
+            continue
+        # Synthetic unit so _finding / snippets still work
+        unit = CodeUnit(
+            source_file=form.get("source_file") or "graph",
+            element_name=name,
+            element_type="subform" if form.get("is_subform") else "form",
+            language="formula",
+            event="form_design",
+            body=(
+                f"' Form {name} has {len(summary_eligible)} non-richtext fields "
+                f"(threshold {SUMMARY_FIELD_WARN_THRESHOLD}). "
+                f"Sample: {', '.join(summary_eligible[:12])}"
+            ),
+            start_line=1,
+        )
+        out.append(
+            _finding(
+                "FORM-004",
+                unit,
+                line=1,
+                evidence=unit.body,
+                confidence=78,
+                impact=(
+                    f"Form `{name}` defines {len(summary_eligible)} non-richtext fields. "
+                    "Notes marks most of these summary by default; dense summary payloads "
+                    "trigger the classic 32KB summary error (open/save/view failures)."
+                ),
+                remediation=(
+                    "Audit which fields are required in views/search; set IsSummary=False "
+                    "(agent) or move bulky data to Rich Text/attachments; consider "
+                    "NSF_LargeSummary=1 only as a server-side stopgap."
+                ),
+                action=f"Reduce summary footprint on form `{name}` (target < {SUMMARY_FIELD_WARN_THRESHOLD} summary fields).",
+            )
+        )
+    return out
+
+
+FORM_DETECTORS = [detect_form001, detect_form002, detect_form003, detect_form004]
+
+__all__ = [
+    "FORM_DETECTORS",
+    "SUMMARY_FIELD_WARN_THRESHOLD",
+    "bind_helpers",
+    "detect_form001",
+    "detect_form002",
+    "detect_form003",
+    "detect_form004",
+    "detect_form004_from_graph",
+]
