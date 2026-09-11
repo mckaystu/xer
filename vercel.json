@@ -1,10 +1,7 @@
 {
   "$schema": "https://openapi.vercel.sh/vercel.json",
-  "buildCommand": "mkdir -p public && printf 'Xer serves UI via FastAPI (password-protected when XER_APP_PASSWORD is set).\\n' > public/README.txt",
-  "installCommand": "pip install -r requirements.txt",
-  "rewrites": [
-    { "source": "/(.*)", "destination": "/server.py" }
-  ],
+  "buildCommand": "mkdir -p public/static && cp web/index.html public/index.html && cp web/app.js web/style.css public/static/",
+  "installCommand": "pip install -r requirements.txt && npm install",
   "functions": {
     "server.py": {
       "maxDuration": 60
