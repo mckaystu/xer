@@ -34,6 +34,7 @@ from analytics.code_auditor.extractor import (
 )
 from analytics.code_auditor.models import CodeUnit
 from analytics.code_auditor.snippets import (
+    annotate_cleanup_highlights,
     extract_line_window,
     language_label,
 )
@@ -529,6 +530,7 @@ def _attach_inventory_snippets(
         allocated_vars=allocated_vars,
         body=analysis_body or display_body,
     )
+    structured = annotate_cleanup_highlights(structured)
     return {
         "code_snippet_as_is": snippet,
         "code_snippet_to_be": to_be,
@@ -551,6 +553,14 @@ def build_inventory(units: Iterable[CodeUnit]) -> list[FunctionRecord]:
             seq += 1
             analysis = analyze_handle_cleanup(fn_body, unit.language)
             status = analysis.status  # type: ignore[assignment]
+            # ODA auto-lifecycle: no lotus.domino mix and no manual recycle → not HE risk
+            if (
+                status in {"UNPROTECTED_ALLOCATION", "PARTIAL_CLEANUP", "CONDITIONAL_CLEANUP"}
+                and re.search(r"org\.openntf\.domino", fn_body or "", re.I)
+                and not re.search(r"lotus\.domino", fn_body or "", re.I)
+                and analysis.recycle_call_count == 0
+            ):
+                status = "PROTECTED"  # type: ignore[assignment]
             lang_label = _language_label(unit.language)
             looped = body_has_loop(fn_body)
             risk = inventory_risk_severity(

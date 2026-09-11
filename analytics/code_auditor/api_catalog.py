@@ -117,6 +117,12 @@ ALLOC_METHODS: tuple[str, ...] = (
     "GetFirstItem",
     "GetMIMEEntity",
     "getMIMEEntity",
+    "getEmbeddedObject",
+    "GetEmbeddedObject",
+    "getObjects",
+    "GetObjects",
+    "getAllUnreadDocuments",
+    "GetAllUnreadDocuments",
 )
 
 # Compiled once
@@ -267,20 +273,38 @@ def find_allocated_vars(body: str, language: str = "") -> list[str]:
     else:
         for m in RE_JAVA_ASSIGN_ALLOC.finditer(text):
             names.add(m.group(1))
-        # Typed declaration with initializer
+        # Typed declaration with a real RHS allocation — skip `= null` / `= undefined`
         for m in re.finditer(
             rf"(?m)^\s*(?:final\s+|private\s+|protected\s+|public\s+|static\s+)*"
-            rf"(?:{_JAVA_TYPE_ALT})\s+([A-Za-z_]\w*)\s*=\s*[^;]+;",
+            rf"(?:{_JAVA_TYPE_ALT})\s+([A-Za-z_]\w*)\s*=\s*([^;]+);",
             text,
         ):
-            names.add(m.group(1))
-        # SSJS typed locals: var attachItem:NotesRichTextItem
+            rhs = (m.group(2) or "").strip()
+            if re.fullmatch(r"(?i)null|undefined|nothing", rhs):
+                continue
+            # Require alloc signal on RHS (factory / Get* / new) — not a plain transfer
+            if RE_JAVA_ASSIGN_ALLOC.search(f"x = {rhs}") or re.search(
+                rf"(?i)\b(?:new\s+(?:{_JAVA_TYPE_ALT})|Factory\.fromLotus)\b",
+                rhs,
+            ):
+                names.add(m.group(1))
+            elif re.search(rf"(?i)\b(?:{_ALLOC_METHOD_ALT})\s*\(", rhs):
+                names.add(m.group(1))
+        # SSJS typed locals: var attachItem:NotesRichTextItem — only count if later assigned
+        # via an alloc method (declaration alone is not a C-API acquisition).
+        typed_ssjs: set[str] = set()
         for m in re.finditer(
             rf"(?i)\b(?:var|let|const)\s+([A-Za-z_]\w*)\s*:\s*"
             rf"(?:{_LS_TYPE_ALT}|{_JAVA_TYPE_ALT})\b",
             text,
         ):
-            names.add(m.group(1))
+            typed_ssjs.add(m.group(1))
+        for name in typed_ssjs:
+            if re.search(
+                rf"(?i)\b{re.escape(name)}\s*=\s*(?:[A-Za-z_]\w*\s*\.\s*)?(?:{_ALLOC_METHOD_ALT})\s*\(",
+                text,
+            ):
+                names.add(name)
     return sorted(names)
 
 
@@ -297,10 +321,9 @@ def find_cleaned_vars(body: str, language: str = "") -> list[str]:
             names.add(m.group(1))
         for m in RE_JAVA_DELETE.finditer(text):
             names.add(m.group(1))
-        if RE_RECYCLE_LOTUSES.search(text):
-            # Bulk helper — treat all allocated names as cleaned when present
-            for v in find_allocated_vars(text, language):
-                names.add(v)
+        # recycleLotuses() is a bulk helper — do NOT blanket-mark every allocated
+        # name as cleaned (that masks real loop leaks). Credit only when it is the
+        # sole cleanup and there is no collection walk without per-doc recycle.
     return sorted(names)
 
 

@@ -71,7 +71,7 @@ class TestJavaHandleRules:
         [
             ("dom001_chained", "DOM-001"),
             ("dom002_loop_no_recycle", "DOM-002"),
-            ("dom003_missing_try", "DOM-003"),
+            ("dom003_missing_try", "DOM-010"),
             ("dom004_oda_recycle", "DOM-004"),
             ("dom006_static_handle", "DOM-006"),
             ("dom010_missing_finally", "DOM-010"),

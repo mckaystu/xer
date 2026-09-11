@@ -1402,6 +1402,20 @@ th { color: var(--muted); font-weight: 500; }
   color: #ffe0c0;
 }
 
+.snippet-line.is-recycle {
+  background: rgba(72, 180, 140, 0.18);
+  box-shadow: inset 3px 0 0 #48b48c;
+}
+
+.snippet-line.is-recycle .snippet-ln {
+  color: #7ddeb8;
+  font-weight: 700;
+}
+
+.snippet-line.is-recycle .snippet-tx {
+  color: #d4f5e8;
+}
+
 .diff-grid {
   display: grid;
   grid-template-columns: 1fr 1fr;

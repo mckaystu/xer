@@ -228,6 +228,7 @@ class TestPass3CrossModuleOwnership:
                         {
                             "finding_id": "F-001",
                             "new_severity": "CRITICAL",
+                            "confidence": 90,
                             "reasoning": "Scheduled agent hot path.",
                         }
                     ],

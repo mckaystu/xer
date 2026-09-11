@@ -185,6 +185,10 @@ def test_build_code_analysis_rubric_docx():
     assert "Static search rules" in xml or "search rules" in xml.lower()
     assert "LS-DOM" not in xml
     assert "LotusScript Handle Lifecycle" not in xml
-    # No LotusScript language references (lotus.domino Java package name in DOM-005 is OK)
-    assert "LotusScript" not in xml
     assert "hygiene reference" not in xml.lower()
+    # Formula Quality is not C-API handle exhaustion — omit from handle rubric
+    assert "FORM-001" not in xml
+    assert "Formula Quality" not in xml
+    assert "Handle Exhaustion = Java" in xml
+    # Scope callout may mention LotusScript as out of scope; LS rule tables must stay out
+    assert "out of scope" in xml.lower()

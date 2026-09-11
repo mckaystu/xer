@@ -18,11 +18,12 @@ from analytics.code_auditor.models import RULE_CATALOG, CodeUnit, Finding
 from analytics.code_auditor.snippets import attach_snippet_fields, remediation_template
 
 HANDLE_ALLOC_HINT = re.compile(
-    r"\bNotes(?:Document|View|Database|ViewEntry|DateTime|Session)\b"
-    r"|\b(?:Document|View|Database|ViewEntry|DateTime)\b"
+    r"\bNotes(?:Document|View|Database|ViewEntry|DateTime)\b"
     r"|\b(?:createDateTime|createViewNav|GetDocumentByUNID|GetFirstDocument|"
     r"GetNextDocument|GetEntryByKey|getDocumentByUNID|getFirstDocument|"
-    r"getNextDocument|getView|getDatabase|CreateDocument)\b",
+    r"getNextDocument|getView|getDatabase|getCurrentDatabase|CreateDocument|createDocument|"
+    r"getEmbeddedObject|createStream|getAllDocumentsByKey)\b"
+    r"|(?:lotus\.domino\.(?:Document|View|Database|ViewEntry))",
     re.I,
 )
 
@@ -31,14 +32,16 @@ SEVERITY CONTEXT review.
 You receive static-rule findings plus the surrounding code.
 
 For each finding, decide:
-- FALSE_POSITIVE — the code safely handles / recycles the object via non-standard means
-  (ODA auto-lifecycle, custom helper that Deletes/recycles, early return after Delete,
-  framework wrapper, LotusScript scope exit that is actually safe, etc.)
-- VERIFIED_NON_LOOP — the leak / missing Delete is real BUT the allocation is in a
-  one-shot helper / single-execution path (no Do While / Forall / while / for collection
-  loop). Demote severity to LOW. This is routine memory hygiene, not handle-table exhaustion.
-- VERIFIED — the leak / anti-pattern is real and still needs remediation (especially when
-  inside a long-running collection loop or hot agent path).
+- FALSE_POSITIVE — ONLY when you can quote clear evidence of safe cleanup, e.g.:
+  * `.recycle()` / `Delete` of the SAME variable named in the finding
+  * ODA (`org.openntf.domino` / Factory) with NO raw `lotus.domino` mix and NO need for manual recycle
+  * caller recycles a returned Document in the same function (quote both return + recycle)
+  Never mark FALSE_POSITIVE on speculation ("probably fine") or import-only code.
+- VERIFIED_NON_LOOP — the leak is real BUT allocation is clearly outside any collection loop
+  (no for/while/Do While around the alloc). Use ONLY for loop-sensitive hygiene rules
+  (missing recycle scaffolding, item/stream leaks). Do NOT use VERIFIED_NON_LOOP for:
+  static/session-scoped handles, ODA manual recycle, or Session/current-Database recycle.
+- VERIFIED — real leak / anti-pattern that still needs remediation (especially in loops).
 
 Return ONLY valid JSON:
 {
@@ -47,14 +50,13 @@ Return ONLY valid JSON:
       "finding_id": "F-001",
       "verdict": "VERIFIED|FALSE_POSITIVE|VERIFIED_NON_LOOP",
       "confidence": 0-100,
-      "reasoning": "1-3 sentences explaining why",
-      "in_loop": true
+      "reasoning": "1-3 sentences; quote the cleanup line or why it is unsafe",
+      "in_loop": true,
+      "evidence_quote": "short code excerpt proving the verdict"
     }
   ]
 }
-Be conservative: only mark FALSE_POSITIVE when cleanup is clearly present or framework-owned.
-Use VERIFIED_NON_LOOP when the un-deleted handle is clearly outside any iteration loop.
-Include an honest confidence (0-100); the host discards reviews below its confidence threshold.
+Be conservative: when unsure, return VERIFIED. Include honest confidence (0-100).
 """
 
 NON_LOOP_AI_NOTE = (
@@ -62,18 +64,42 @@ NON_LOOP_AI_NOTE = (
     "recommended for general code hygiene."
 )
 
+# Rules that may be demoted via VERIFIED_NON_LOOP / in_loop=false
+_NON_LOOP_DEMOTE_RULES = frozenset(
+    {
+        "DOM-001",
+        "DOM-002",
+        "DOM-003",
+        "DOM-010",
+        "DOM-012",
+        "DOM-013",
+        "DOM-014",
+        "DOM-016",
+        "DOM-017",
+        "DOM-018",
+        "DOM-019",
+        "DOM-021",
+        "DOM-BS-001",
+    }
+)
+
 BLIND_SPOT_SYSTEM_PROMPT = """You are a Domino architecture expert hunting BLIND-SPOT handle leaks.
 Static regex rules found ZERO issues in this code block, but Domino handles appear to be allocated.
 
-Analyze logical control flow for native C-API handle leaks hidden in:
-- nested branches / early exits
-- conditional loops that skip Delete / .recycle()
-- exception handlers that bypass cleanup
-- re-assignment without releasing the prior handle
-- module-level lifetime mistakes
+ONLY report a blind spot when ALL of these are true:
+1) You can name a specific variable that receives a Domino handle (Document/View/Item/…)
+2) You can quote the allocation line AND show that variable is not recycled/Deleted on that path
+3) Confidence is high (prefer ≥85)
 
-LotusScript prefers Delete (and Call obj.Recycle); Java/SSJS prefer try/finally + .recycle().
-ODA (org.openntf.domino) usually must NOT be manually recycled.
+High-precision patterns to look for:
+- temp-next walks: `next = coll.getNextDocument(doc); …; doc = next;` with no `doc.recycle()`
+- early return / catch after allocation without recycle
+- nested if that skips finally
+
+Do NOT report:
+- ODA-only code (`org.openntf.domino`) without lotus.domino mix
+- import statements or type declarations with no allocation
+- speculative "might leak" without a named unclean variable
 
 Return ONLY valid JSON:
 {
@@ -82,7 +108,8 @@ Return ONLY valid JSON:
       "severity": "CRITICAL|HIGH|MEDIUM|LOW",
       "confidence": 0-100,
       "line_hint": 1,
-      "evidence": "short code excerpt",
+      "unclean_var": "doc",
+      "evidence": "short code excerpt showing alloc + missing recycle",
       "technical_impact": "why it matters",
       "remediation": "fixed pattern guidance",
       "action_required": "short action",
@@ -91,7 +118,6 @@ Return ONLY valid JSON:
   ]
 }
 If the code is genuinely safe, return {"blind_spots": []}.
-Only report high-confidence real leaks (prefer confidence at or above the host threshold, typically 75).
 """
 
 PASS3_SYSTEM_PROMPT = """You are a Domino architecture expert performing CROSS-MODULE handle ownership
@@ -101,11 +127,11 @@ You receive multiple related code units (functions/subs) from the same applicati
 
 Tasks:
 1) Cross-boundary ownership: if a function returns Document/NotesDocument OR accepts one as a
-   parameter, decide whether caller or callee is responsible for Delete/.recycle(). If NEITHER
-   clearly releases the handle, emit an ownership finding.
-2) Risk escalation: if a leak/path runs in a scheduled/background agent (Initialize of an agent,
-   polling loop, bulk processor) vs a one-shot UI event, escalate severity.
-3) To-Be sanity: when suggesting remediation, preserve return values and business/transaction logic.
+   parameter, decide whether caller or callee is responsible for Delete/.recycle(). Emit an
+   ownership gap ONLY when you can quote BOTH sides and show neither releases the handle.
+2) Risk escalation: escalate ONLY when a finding is already a VERIFIED loop leak AND the
+   element is a scheduled/background agent (Initialize / agent). Do not escalate UI one-shots.
+3) To-Be sanity: when suggesting remediation, preserve return values and business logic.
 
 Return ONLY valid JSON:
 {
@@ -115,24 +141,23 @@ Return ONLY valid JSON:
       "confidence": 0-100,
       "element_name": "function or design element name",
       "line_hint": 1,
-      "evidence": "short excerpt",
+      "evidence": "short excerpt proving neither side recycles",
       "technical_impact": "why ownership is unclear",
       "action_required": "who should Delete/recycle",
-      "reasoning": "caller/callee contract analysis",
-      "execution_context": "background_agent|form_event|library|unknown",
-      "escalate": true
+      "escalate": false,
+      "execution_context": "ui_event|background_agent|unknown"
     }
   ],
   "severity_adjustments": [
     {
       "finding_id": "F-001",
-      "new_severity": "CRITICAL|HIGH|MEDIUM|LOW",
-      "reasoning": "why escalate/demote based on hot path / background thread"
+      "new_severity": "CRITICAL",
+      "confidence": 0-100,
+      "reasoning": "why escalate — must cite background agent + existing loop leak"
     }
   ]
 }
-If nothing to report: {"ownership_gaps": [], "severity_adjustments": []}.
-Prefer confidence at or above the host threshold (typically 75) for ownership_gaps.
+If nothing is clear, return empty arrays. Prefer confidence ≥85 for ownership gaps.
 """
 
 INVENTORY_FP_SYSTEM_PROMPT = """You are a Domino architecture expert reviewing Function & Recycle
@@ -316,6 +341,18 @@ def _pass1_false_positive_filter(
                 finding.confidence = min(finding.confidence, max(40, 100 - confidence))
                 fps += 1
             elif verdict in {"VERIFIED_NON_LOOP", "NON_LOOP", "VERIFIED_HYGIENE"}:
+                if finding.rule_id not in _NON_LOOP_DEMOTE_RULES:
+                    # Never demote static handles / ODA misuse / session recycle via NON_LOOP
+                    finding.ai_validation_status = "VERIFIED"
+                    finding.ai_validation_reasoning = (
+                        (reasoning or "AI confirmed risk")
+                        + " | NON_LOOP demotion skipped for non-hygiene rule "
+                        + finding.rule_id
+                    )
+                    finding.is_false_positive = False
+                    finding.engine = "hybrid" if finding.engine == "rules" else finding.engine
+                    finding.confidence = max(finding.confidence, confidence)
+                    continue
                 finding.ai_validation_status = "VERIFIED_NON_LOOP"
                 note = NON_LOOP_AI_NOTE
                 finding.ai_validation_reasoning = (
@@ -342,18 +379,18 @@ def _pass1_false_positive_filter(
                 finding.is_false_positive = False
                 finding.engine = "hybrid" if finding.engine == "rules" else finding.engine
                 finding.confidence = max(finding.confidence, confidence)
-                # If model reports in_loop=false but verdict VERIFIED, still demote gently
-                if review.get("in_loop") is False and finding.severity in {
-                    "CRITICAL",
-                    "HIGH",
-                }:
-                    finding.severity = "MEDIUM"
+                # Gentle demotion only for hygiene rules when model says not in a loop
+                if (
+                    review.get("in_loop") is False
+                    and finding.rule_id in _NON_LOOP_DEMOTE_RULES
+                    and finding.severity in {"CRITICAL", "HIGH"}
+                ):
+                    finding.severity = "LOW"
                     finding.ai_validation_status = "VERIFIED_NON_LOOP"
                     finding.ai_validation_reasoning = (
                         (finding.ai_validation_reasoning + " | " if finding.ai_validation_reasoning else "")
                         + NON_LOOP_AI_NOTE
                     )
-                    finding.severity = "LOW"
 
     notes.append(
         f"AI Pass 1 (false-positive filter): reviewed {reviewed} finding(s), "
@@ -515,6 +552,9 @@ def _pass3_cross_module_ownership(
         fid = str(adj.get("finding_id") or "")
         finding = by_id.get(fid)
         if not finding or finding.is_false_positive:
+            continue
+        conf = _parse_confidence(adj.get("confidence"), default=0)
+        if conf < ai_confidence_min():
             continue
         new_sev = str(adj.get("new_severity") or "").upper()
         if new_sev not in {"CRITICAL", "HIGH", "MEDIUM", "LOW"}:

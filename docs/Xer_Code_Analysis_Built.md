@@ -56,7 +56,7 @@ DXL / ODP / application graph
 
 ## Static rule catalog
 
-### Handle lifecycle — Java / SSJS (`DOM-001` … `DOM-016`) — *Handle Exhaustion*
+### Handle lifecycle — Java / SSJS (`DOM-001` … `DOM-021`) — *Handle Exhaustion*
 
 | ID | Focus |
 |----|--------|
@@ -70,6 +70,13 @@ DXL / ODP / application graph
 | DOM-014 | Un-recycled Item / MIME / RichText |
 | DOM-015 | Un-recycled ViewNavigator / ViewEntryCollection |
 | DOM-016 | `search` / `FTSearch` collection leaks in loops |
+| DOM-017 | Un-recycled EmbeddedObject / attachment handles |
+| DOM-018 | `ViewEntry.getDocument()` without Document recycle |
+| DOM-019 | Un-recycled `getAllDocumentsByKey` / multi-doc collections |
+| DOM-020 | Dangerous recycle of Session / current Database |
+| DOM-021 | Un-recycled Stream / NotesStream |
+
+**Risk hierarchy (worse → milder):** Document/entry walks & navigators → multi-doc collections & attachments/MIME in loops → static/scoped live handles → one-shot hygiene. Never recycle Session or the XPages current `database`.
 
 ### LotusScript — out of scope
 
@@ -77,13 +84,14 @@ LotusScript does not create the same native C-API handle-table exhaustion risk a
 `.recycle()` leaks. **LS-DOM-* rules are not wired**, do not appear in the UI work list, and
 are **omitted from the Download rules & rubric** Word guide.
 
-### Performance & NIF (`PERF-001` … `PERF-003`)
+### Performance & NIF (`PERF-001` … `PERF-004`)
 
 | ID | Focus |
 |----|--------|
 | PERF-001 | Missing `view.AutoUpdate = False` in write loops |
 | PERF-002 | `getView` / `GetView` inside loops (hoistable) |
 | PERF-003 | Unbatched `doc.save` / `Save` per iteration |
+| PERF-004 | O(n²) `GetNthDocument` / `GetNthEntry` iteration |
 
 ### Security (`SEC-001`, `SEC-002`)
 

@@ -3,7 +3,9 @@
 
 from __future__ import annotations
 
+import base64
 import os
+import secrets
 from pathlib import Path
 from typing import Any
 
@@ -13,6 +15,9 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, Response
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
+from starlette.middleware.base import BaseHTTPMiddleware
+from starlette.requests import Request
+from starlette.responses import Response as StarletteResponse
 
 XER_ROOT = Path(__file__).resolve().parent
 WEB_DIR = XER_ROOT / "web"
@@ -20,6 +25,49 @@ WEB_DIR = XER_ROOT / "web"
 load_dotenv(XER_ROOT / ".env", override=False)
 
 app = FastAPI(title="Xer DXL Graph API", version="1.0.0")
+
+
+class BasicAuthMiddleware(BaseHTTPMiddleware):
+    """HTTP Basic Auth when ``XER_APP_PASSWORD`` is set (Vercel + local).
+
+    Leave the password unset for open local development. Username defaults to ``xer``.
+    ``/api/health`` stays open for uptime checks.
+    """
+
+    open_paths = frozenset({"/api/health"})
+
+    async def dispatch(self, request: Request, call_next) -> StarletteResponse:
+        password = (os.getenv("XER_APP_PASSWORD") or "").strip()
+        if not password:
+            return await call_next(request)
+
+        path = request.url.path or "/"
+        if path in self.open_paths or request.method == "OPTIONS":
+            return await call_next(request)
+
+        username = (os.getenv("XER_APP_USERNAME") or "xer").strip() or "xer"
+        auth = request.headers.get("Authorization") or ""
+        if auth.lower().startswith("basic "):
+            try:
+                raw = base64.b64decode(auth.split(" ", 1)[1].strip()).decode("utf-8")
+                user, sep, pwd = raw.partition(":")
+                if sep and secrets.compare_digest(user, username) and secrets.compare_digest(
+                    pwd, password
+                ):
+                    return await call_next(request)
+            except Exception:
+                pass
+
+        return Response(
+            content="Authentication required",
+            status_code=401,
+            headers={"WWW-Authenticate": 'Basic realm="Xer", charset="UTF-8"'},
+            media_type="text/plain",
+        )
+
+
+# Auth first so unauthenticated requests never reach CORS / handlers.
+app.add_middleware(BasicAuthMiddleware)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],

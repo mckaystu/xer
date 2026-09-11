@@ -10,6 +10,7 @@ from analytics.code_auditor.context import (
     NON_LOOP_HYGIENE_NOTE,
     body_has_loop,
     calibrate_handle_severity,
+    is_client_javascript,
     is_lotusscript_language,
 )
 from analytics.code_auditor.models import RULE_CATALOG, CodeUnit, Finding
@@ -35,9 +36,13 @@ RE_RECYCLE = re.compile(r"\.recycle\s*\(", re.I)
 RE_TRY = re.compile(r"\btry\b", re.I)
 RE_FINALLY = re.compile(r"\bfinally\b", re.I)
 RE_LOTUS_NEW = re.compile(
-    r"\b(?:lotus\.domino\.)?(?:Session|Database|Document|View|ViewEntry|DocumentCollection|DateTime|Name)\b"
-    r"|\bNotes(?:Session|Database|Document|View|ViewEntry|DateTime|Name)\b"
-    r"|\.get(?:Database|View|Document|FirstDocument|NextDocument)\s*\(",
+    r"(?m)^(?!\s*import\b).{0,120}?"
+    r"(?:"
+    r"\b(?:lotus\.domino\.)?(?:Database|Document|View|ViewEntry|DocumentCollection|DateTime|Name)\b\s+\w+\s*="
+    r"|\bNotes(?:Database|Document|View|ViewEntry|DateTime|Name)\b\s+\w+\s*="
+    r"|\.\s*get(?:Database|View|Document|FirstDocument|NextDocument|DocumentByUNID)\s*\("
+    r"|\.\s*create(?:Document|DateTime|ViewNav|MIMEEntity|Stream)\s*\("
+    r")",
     re.I,
 )
 RE_ODA_IMPORT = re.compile(r"import\s+org\.openntf\.domino", re.I)
@@ -84,11 +89,12 @@ RE_PASS_LOTUS_HINT = re.compile(
 # DOM-010: object creation / acquisition assignments
 RE_OBJECT_CREATE = re.compile(
     r"""(?P<lhs>\b(?:Database|View|Document|ViewEntry|DocumentCollection|DateTime|Name|
-        NotesDatabase|NotesDocument|NotesView|NotesViewEntry|NotesDateTime)\b
-        \s+(?P<var>\w+)\s*=
+        NotesDatabase|NotesDocument|NotesView|NotesViewEntry|NotesDateTime|Stream|MIMEEntity)\b
+        \s+(?P<var>\w+)\s*=\s*(?!null\b|undefined\b)
         |(?P<var2>\w+)\s*=\s*(?:\(\s*)?(?:Database|View|Document|Session)
         |\b(?:Set\s+)?(?P<var3>\w+)\s*=\s*.*\.(?:getDatabase|getView|getFirstDocument|getDocumentByKey|
-            getAllDocumentsByKey|getAllEntries|createDateTime|createName)\s*\()""",
+            getDocumentByUNID|createDocument|getAllDocumentsByKey|getAllEntries|createDateTime|
+            createName|createViewNav|createMIMEEntity|createStream|getMIMEEntity)\s*\()""",
     re.I | re.X,
 )
 
@@ -102,17 +108,33 @@ RE_CHILD_USE = re.compile(
     re.I,
 )
 
-# DOM-012: recycle inside if within a loop-ish region (Java / SSJS only)
+# Null-guard recycle is correct Domino hygiene — not DOM-012
+RE_NULL_GUARD_RECYCLE = re.compile(
+    r"""(?is)if\s*\(\s*([A-Za-z_]\w*)\s*(?:!=|!==|<>)\s*(?:null|undefined|Nothing)\s*\)\s*
+        \{.{0,160}?\1\s*\.\s*recycle\s*\(\s*\)""",
+    re.X,
+)
+
+# DOM-012: recycle inside business if within a loop (exclude null guards)
 RE_CONDITIONAL_RECYCLE = re.compile(
-    r"""(?:for|while|do)\b[\s\S]{0,400}?
-        \bif\s*\([^)]*\)\s*\{[^}]{0,200}?\.\s*recycle\s*\(\s*\)""",
-    re.I | re.X,
+    r"""(?is)(?:for|while)\s*\([^;{]{0,120}\)\s*\{.{0,500}?
+        \bif\s*\(\s*(?![A-Za-z_]\w*\s*(?:!=|!==)\s*(?:null|undefined))
+        [^;{]{0,120}\)\s*\{.{0,200}?\.\s*recycle\s*\(\s*\)""",
+    re.X,
 )
 
 # DOM-013: doc = coll.getNextDocument(doc) without prior recycle of doc
 RE_UNSAFE_REASSIGN = re.compile(
     r"""(?P<var>\w+)\s*=\s*[\w\.]+\.getNext(?:Document|Entry)\s*\(\s*(?P=var)\s*\)
         |Set\s+(?P<var2>\w+)\s*=\s*[\w\.]+\.GetNext(?:Document|Entry)\s*\(\s*(?P=var2)\s*\)""",
+    re.I | re.X,
+)
+# Safer structural form that still leaks without recycle:
+#   next = coll.getNextDocument(doc); ...; doc = next;
+RE_TEMP_NEXT_REASSIGN = re.compile(
+    r"""(?P<next>\w+)\s*=\s*(?P<coll>\w+)\s*\.\s*getNext(?:Document|Entry)\s*\(\s*(?P<doc>\w+)\s*\)\s*;
+        [\s\S]{0,400}?
+        (?P=doc)\s*=\s*(?P=next)\s*;""",
     re.I | re.X,
 )
 
@@ -227,9 +249,39 @@ def detect_dom002(unit: CodeUnit) -> list[Finding]:
         return []
     if not RE_LOOP.search(unit.body) or not RE_GET_NEXT.search(unit.body):
         return []
-    # Quality pattern: recycle present → incomplete recycle is DOM-012; unsafe
-    # same-var reassignment is DOM-013. Do not flag DOM-002 on try/finally loops.
-    if RE_RECYCLE.search(unit.body):
+
+    # Require recycle of iteration vars — not merely any .recycle() (e.g. only coll.recycle()).
+    iter_vars: set[str] = set()
+    for m in re.finditer(
+        r"(?i)\b(?:Document|ViewEntry|NotesDocument|NotesViewEntry)?\s*"
+        r"([A-Za-z_]\w*)\s*=\s*\w+\s*\.\s*get(?:First|Next)(?:Document|Entry)\s*\(",
+        unit.body,
+    ):
+        iter_vars.add(m.group(1))
+    for m in re.finditer(
+        r"(?i)\bgetNext(?:Document|Entry)\s*\(\s*([A-Za-z_]\w*)\s*\)",
+        unit.body,
+    ):
+        iter_vars.add(m.group(1))
+    if not iter_vars:
+        iter_vars = {"doc", "entry", "document"}
+
+    def _iter_recycled() -> bool:
+        for var in iter_vars:
+            if re.search(rf"\b{re.escape(var)}\s*\.\s*recycle\s*\(", unit.body, re.I):
+                return True
+        if RE_FINALLY.search(unit.body) and any(
+            re.search(
+                rf"\bfinally\b[\s\S]{{0,400}}?\b{re.escape(v)}\s*\.\s*recycle\s*\(",
+                unit.body,
+                re.I,
+            )
+            for v in iter_vars
+        ):
+            return True
+        return False
+
+    if _iter_recycled():
         return []
     match = RE_GET_NEXT.search(unit.body)
     assert match is not None
@@ -277,6 +329,9 @@ def detect_dom003(unit: CodeUnit) -> list[Finding]:
         if name.startswith("csjs") or "/csjs" in name:
             return []
     else:
+        return []
+    # Prefer DOM-010 for typed create assignments — avoid double-fire
+    if RE_OBJECT_CREATE.search(unit.body):
         return []
     if not RE_LOTUS_NEW.search(unit.body):
         return []
@@ -545,27 +600,18 @@ def detect_dom010(unit: CodeUnit) -> list[Finding]:
 
 
 def detect_dom011(unit: CodeUnit) -> list[Finding]:
-    """Parent recycled while child handles may still be live."""
+    """Parent recycled while child handles may still be live afterward."""
     findings: list[Finding] = []
     for match in RE_PARENT_RECYCLE.finditer(unit.body):
         parent = match.group("parent")
         after = unit.body[match.end() : match.end() + 400]
-        child_match = RE_CHILD_USE.search(after)
-        # Also look slightly before for child acquisition from this parent
-        before = unit.body[max(0, match.start() - 500) : match.start()]
-        acquired_child = bool(
-            re.search(
-                rf"\b(?:doc|entry|document)\b[^\n]{{0,80}}{re.escape(parent)}\s*\.\s*get",
-                before,
-                re.I,
-            )
-            or re.search(
-                rf"{re.escape(parent)}\s*\.\s*get(?:First|Next)?(?:Document|Entry)",
-                before,
-                re.I,
-            )
-        )
-        if not (child_match or acquired_child):
+        # Only flag when a child handle is still used AFTER the parent recycle
+        child_after = RE_CHILD_USE.search(after)
+        if not child_after:
+            continue
+        # Ignore comments / recycle of the child itself right after
+        after_snip = after[: child_after.start() + 40]
+        if re.search(r"^\s*//", after_snip, re.M) and "recycle" in after_snip.lower():
             continue
         line = _line_of(unit.body, match.start(), unit.start_line)
         findings.append(
@@ -604,23 +650,32 @@ def detect_dom012(unit: CodeUnit) -> list[Finding]:
     """Recycle only on some loop branches — other paths leak."""
     if not RE_LOOP.search(unit.body):
         return []
-    match = RE_CONDITIONAL_RECYCLE.search(unit.body)
+    # Correct null-guard recycle is not a business-condition leak
+    body_wo_null_guards = RE_NULL_GUARD_RECYCLE.sub("/* null-guard recycle */", unit.body)
+    match = RE_CONDITIONAL_RECYCLE.search(body_wo_null_guards)
     if not match:
-        # Secondary heuristic: recycle appears inside if but getNext exists
+        # Secondary: business if-recycle near getNext (not null-guard)
         if RE_GET_NEXT.search(unit.body) and re.search(
-            r"if\s*\([^\)]*\)\s*\{[^}]*\.recycle\s*\(", unit.body, re.I | re.S
+            r"(?is)if\s*\(\s*(?![A-Za-z_]\w*\s*(?:!=|!==)\s*(?:null|undefined))"
+            r"[^;{]{0,120}\)\s*\{.{0,200}?\.\s*recycle\s*\(",
+            unit.body,
         ):
-            match = re.search(r"if\s*\([^\)]*\)\s*\{[^}]*\.recycle\s*\(", unit.body, re.I | re.S)
+            match = re.search(
+                r"(?is)if\s*\(\s*(?![A-Za-z_]\w*\s*(?:!=|!==)\s*(?:null|undefined))"
+                r"[^;{]{0,120}\)\s*\{.{0,200}?\.\s*recycle\s*\(",
+                unit.body,
+            )
         else:
             return []
     assert match is not None
-    line = _line_of(unit.body, match.start(), unit.start_line)
+    # Map match offset back when we searched a substituted body
+    line = _line_of(unit.body, min(match.start(), len(unit.body) - 1), unit.start_line)
     return [
         _finding(
             "DOM-012",
             unit,
             line=line,
-            evidence=_snippet(unit.body, match.start(), 280),
+            evidence=_snippet(unit.body, min(match.start(), len(unit.body) - 1), 280),
             confidence=85,
             impact=(
                 "When .recycle() is guarded by an if inside a collection loop, failure/skip paths leave "
@@ -649,21 +704,24 @@ def detect_dom012(unit: CodeUnit) -> list[Finding]:
 
 
 def detect_dom013(unit: CodeUnit) -> list[Finding]:
-    """Re-assign loop variable via getNext*(sameVar) without recycling first."""
-    # LotusScript reassignment leaks are owned by LS-DOM-001 (Delete before advance)
+    """Re-assign loop variable via getNext* without recycling first."""
     lang = (unit.language or "").lower()
     if "lotus" in lang or lang in {"ls", "lss", "notes"}:
         return []
     findings: list[Finding] = []
+    seen_lines: set[int] = set()
+
     for match in RE_UNSAFE_REASSIGN.finditer(unit.body):
         var = match.group("var") or match.group("var2") or "doc"
-        # If recycle of that var appears in the 120 chars before assignment, treat as safer
         prelude = unit.body[max(0, match.start() - 160) : match.start()]
         if re.search(rf"\b{re.escape(var)}\s*\.\s*recycle\s*\(", prelude, re.I):
             continue
         if re.search(rf"\bDelete\s+{re.escape(var)}\b", prelude, re.I):
             continue
         line = _line_of(unit.body, match.start(), unit.start_line)
+        if line in seen_lines:
+            continue
+        seen_lines.add(line)
         findings.append(
             _finding(
                 "DOM-013",
@@ -683,6 +741,42 @@ def detect_dom013(unit: CodeUnit) -> list[Finding]:
                 action=f"Capture next handle in a temp, recycle `{var}`, then reassign.",
                 handle_lifecycle_warning=(
                     f"Line {line}: `{var}` re-assigned from getNext* without recycling the previous handle."
+                ),
+            )
+        )
+
+    # Temp-next pattern: next = getNext*(doc); …; doc = next; without doc.recycle in between
+    for match in RE_TEMP_NEXT_REASSIGN.finditer(unit.body):
+        doc_var = match.group("doc")
+        next_var = match.group("next")
+        if doc_var == next_var:
+            continue
+        window = match.group(0)
+        if re.search(rf"\b{re.escape(doc_var)}\s*\.\s*recycle\s*\(", window, re.I):
+            continue
+        line = _line_of(unit.body, match.start(), unit.start_line)
+        if line in seen_lines:
+            continue
+        seen_lines.add(line)
+        findings.append(
+            _finding(
+                "DOM-013",
+                unit,
+                line=line,
+                evidence=_snippet(unit.body, match.start(), 280),
+                confidence=91,
+                impact=(
+                    f"`{next_var} = …getNext*({doc_var})` then `{doc_var} = {next_var}` without "
+                    f"`{doc_var}.recycle()` leaks the previous Document/ViewEntry each iteration."
+                ),
+                remediation=(
+                    f"Document {next_var} = collection.getNextDocument({doc_var});\n"
+                    f"try {{ /* process {doc_var} */ }} finally {{ {doc_var}.recycle(); }}\n"
+                    f"{doc_var} = {next_var};"
+                ),
+                action=f"Recycle `{doc_var}` after capturing `{next_var}`, before reassignment.",
+                handle_lifecycle_warning=(
+                    f"Line {line}: temp-next advance of `{doc_var}` without recycle."
                 ),
             )
         )
@@ -816,6 +910,242 @@ def detect_dom016(unit: CodeUnit) -> list[Finding]:
     return findings
 
 
+RE_EMBEDDED_JAVA = re.compile(
+    r"""(?:\b(?:EmbeddedObject|NotesEmbeddedObject)\b\s+(?P<var>\w+)\s*=)"""
+    r"""|(?P<var2>\w+)\s*=\s*\w+\s*\.\s*
+        (?P<meth>getEmbeddedObject|getObjects|GetEmbeddedObject|GetObjects)\s*\(""",
+    re.I | re.X,
+)
+RE_ENTRY_GET_DOC = re.compile(
+    r"""(?P<doc>\w+)\s*=\s*(?P<entry>\w+)\s*\.\s*getDocument\s*\(\s*\)""",
+    re.I,
+)
+RE_ALL_DOCS_BY_KEY = re.compile(
+    r"""(?:\bDocumentCollection\b\s+(?P<var>\w+)\s*=\s*\w+\s*\.\s*
+        (?P<meth>getAllDocumentsByKey|getAllUnreadDocuments|FTSearchRange)\s*\()"""
+    r"""|(?P<var2>\w+)\s*=\s*\w+\s*\.\s*
+        (?P<meth2>getAllDocumentsByKey|getAllUnreadDocuments|FTSearchRange)\s*\(""",
+    re.I | re.X,
+)
+RE_BAD_SESSION_DB_RECYCLE = re.compile(
+    r"""(?:(?P<sess>\b(?:session|dominoSession|notesSession)\b)\s*\.\s*recycle\s*\()"""
+    r"""|(?:getCurrentDatabase\s*\([^)]*\)\s*\.\s*recycle\s*\()"""
+    r"""|(?P<cdb>\b(?:currentDatabase|currDb|currentDb)\b)\s*\.\s*recycle\s*\("""
+    r"""|(?P<xspDb>\bdatabase\b)\s*\.\s*recycle\s*\(""",
+    re.I | re.X,
+)
+RE_STREAM_JAVA = re.compile(
+    r"""(?:\b(?:Stream|NotesStream)\b\s+(?P<var>\w+)\s*=)"""
+    r"""|(?P<var2>\w+)\s*=\s*\w+\s*\.\s*(?P<meth>createStream|CreateStream)\s*\(""",
+    re.I | re.X,
+)
+
+
+def _java_like_unit(unit: CodeUnit) -> bool:
+    lang = (unit.language or "").lower()
+    if "lotus" in lang or lang in {"ls", "lss", "notes"}:
+        return False
+    return True
+
+
+def _var_recycled(body: str, var: str, *, after: int | None = None) -> bool:
+    text = body if after is None else body[after:]
+    return bool(re.search(rf"\b{re.escape(var)}\s*\.\s*recycle\s*\(", text, re.I))
+
+
+def detect_dom017(unit: CodeUnit) -> list[Finding]:
+    """Un-recycled EmbeddedObject / attachment handles (Java/SSJS)."""
+    if not _java_like_unit(unit):
+        return []
+    findings: list[Finding] = []
+    for match in RE_EMBEDDED_JAVA.finditer(unit.body):
+        var = match.group("var") or match.group("var2")
+        if not var:
+            continue
+        meth = match.groupdict().get("meth") or "getEmbeddedObject"
+        if _var_recycled(unit.body, var):
+            continue
+        line = _line_of(unit.body, match.start(), unit.start_line)
+        findings.append(
+            _finding(
+                "DOM-017",
+                unit,
+                line=line,
+                evidence=_snippet(unit.body, match.start()),
+                confidence=88,
+                impact=(
+                    f"`{meth}` yields EmbeddedObject handle `{var}` without `.recycle()`. "
+                    "Attachment objects pin native C-API slots and leak badly inside attachment loops."
+                ),
+                remediation=remediation_template("DOM-017", unit.language),
+                action=f"Recycle `{var}` in finally after reading bytes / file path.",
+                handle_lifecycle_warning=f"Line {line}: EmbeddedObject `{var}` never recycled.",
+            )
+        )
+    return findings
+
+
+def detect_dom018(unit: CodeUnit) -> list[Finding]:
+    """ViewEntry.getDocument() without recycling the Document (especially in loops)."""
+    if not _java_like_unit(unit):
+        return []
+    findings: list[Finding] = []
+    for match in RE_ENTRY_GET_DOC.finditer(unit.body):
+        doc_var = match.group("doc")
+        entry_var = match.group("entry")
+        # Skip obvious non-entry receivers
+        if entry_var.lower() in {"db", "database", "view", "session", "doc", "document"}:
+            continue
+        if _var_recycled(unit.body, doc_var, after=match.end()):
+            continue
+        before = unit.body[max(0, match.start() - 500) : match.start()]
+        in_loop = bool(re.search(r"\b(?:for|while)\b", before, re.I))
+        # Prefer entry walk context
+        if not re.search(
+            rf"\b{re.escape(entry_var)}\b.*\b(?:getNextEntry|getFirstEntry|ViewEntry)\b"
+            rf"|\bViewEntry\b.*\b{re.escape(entry_var)}\b"
+            rf"|\b{re.escape(entry_var)}\s*=\s*\w+\s*\.\s*get(?:Next|First)Entry",
+            unit.body,
+            re.I | re.S,
+        ) and not re.search(r"\bViewEntry\b", unit.body, re.I):
+            # Still flag if receiver looks like entry/ve/navEntry
+            if not re.search(r"entry|ve\b|nav", entry_var, re.I):
+                continue
+        line = _line_of(unit.body, match.start(), unit.start_line)
+        findings.append(
+            _finding(
+                "DOM-018",
+                unit,
+                line=line,
+                evidence=_snippet(unit.body, match.start()),
+                confidence=90 if in_loop else 82,
+                in_loop=in_loop,
+                impact=(
+                    f"`{entry_var}.getDocument()` allocates Document `{doc_var}` without `.recycle()`. "
+                    "Entry walks that materialize documents are among the fastest ways to exhaust "
+                    "the HTTP-task handle table — recycle the Document every iteration (and the entry)."
+                ),
+                remediation=remediation_template("DOM-018", unit.language, has_loop=in_loop),
+                action=f"Recycle `{doc_var}` each iteration; then recycle `{entry_var}` before advancing.",
+                handle_lifecycle_warning=(
+                    f"Line {line}: Document `{doc_var}` from ViewEntry.getDocument() never recycled."
+                ),
+            )
+        )
+    return findings
+
+
+def detect_dom019(unit: CodeUnit) -> list[Finding]:
+    """getAllDocumentsByKey / unread collections without recycle."""
+    if not _java_like_unit(unit):
+        return []
+    findings: list[Finding] = []
+    for match in RE_ALL_DOCS_BY_KEY.finditer(unit.body):
+        var = match.group("var") or match.group("var2")
+        meth = match.group("meth") or match.group("meth2") or "getAllDocumentsByKey"
+        if not var:
+            continue
+        if _var_recycled(unit.body, var):
+            continue
+        line = _line_of(unit.body, match.start(), unit.start_line)
+        findings.append(
+            _finding(
+                "DOM-019",
+                unit,
+                line=line,
+                evidence=_snippet(unit.body, match.start()),
+                confidence=90,
+                impact=(
+                    f"`{meth}` returns DocumentCollection `{var}` without `.recycle()`. "
+                    "Multi-doc collections hold many child handles; leaking them is high-impact."
+                ),
+                remediation=remediation_template("DOM-019", unit.language),
+                action=f"Walk `{var}` with next-doc recycle, then `{var}.recycle()`.",
+                handle_lifecycle_warning=f"Line {line}: collection `{var}` from {meth} never recycled.",
+            )
+        )
+    return findings
+
+
+def detect_dom020(unit: CodeUnit) -> list[Finding]:
+    """Dangerous recycle of Session or current Database (shared platform handles)."""
+    if not _java_like_unit(unit):
+        return []
+    from analytics.code_auditor.snippets import normalize_language
+
+    lang = (unit.language or "").lower()
+    lang_n = normalize_language(unit.language)
+    findings: list[Finding] = []
+    for match in RE_BAD_SESSION_DB_RECYCLE.finditer(unit.body):
+        gd = match.groupdict()
+        if gd.get("xspDb"):
+            # Bare `database.recycle()` — XPages/SSJS antipattern; skip normal Java locals.
+            if lang_n not in {"ssjs", "javascript", "xpages", "jscript"}:
+                before = unit.body[: match.start()]
+                if re.search(
+                    r"\bDatabase\s+database\b|\bdatabase\s*=\s*\w+\s*\.\s*getDatabase\s*\(",
+                    before,
+                    re.I,
+                ):
+                    continue
+                if "java" in lang and "xpage" not in lang and "xsp" not in lang:
+                    continue
+        evidence = _snippet(unit.body, match.start())
+        target = gd.get("sess") or gd.get("cdb") or gd.get("xspDb") or "getCurrentDatabase()"
+        line = _line_of(unit.body, match.start(), unit.start_line)
+        findings.append(
+            _finding(
+                "DOM-020",
+                unit,
+                line=line,
+                evidence=evidence,
+                confidence=93,
+                impact=(
+                    f"Recycling `{target}` releases a platform-owned / shared handle. "
+                    "This can crash the HTTP task, invalidate later requests, or orphan child objects. "
+                    "Never recycle Session or the current database — only handles you opened."
+                ),
+                remediation=remediation_template("DOM-020", unit.language),
+                action="Remove this recycle; only recycle Database/View/Document instances you opened.",
+                handle_lifecycle_warning=(
+                    f"Line {line}: dangerous recycle of shared Session/current Database handle."
+                ),
+            )
+        )
+    return findings
+
+
+def detect_dom021(unit: CodeUnit) -> list[Finding]:
+    """Un-recycled Stream / NotesStream handles."""
+    if not _java_like_unit(unit):
+        return []
+    findings: list[Finding] = []
+    for match in RE_STREAM_JAVA.finditer(unit.body):
+        var = match.group("var") or match.group("var2")
+        if not var:
+            continue
+        if _var_recycled(unit.body, var):
+            continue
+        line = _line_of(unit.body, match.start(), unit.start_line)
+        findings.append(
+            _finding(
+                "DOM-021",
+                unit,
+                line=line,
+                evidence=_snippet(unit.body, match.start()),
+                confidence=85,
+                impact=(
+                    f"Stream `{var}` is allocated without `.recycle()`. "
+                    "Streams hold native I/O handles; leak risk rises when streams are opened per document."
+                ),
+                remediation=remediation_template("DOM-021", unit.language),
+                action=f"Close and recycle `{var}` in finally after write/read.",
+                handle_lifecycle_warning=f"Line {line}: Stream `{var}` never recycled.",
+            )
+        )
+    return findings
+
+
 DETECTORS = [
     detect_dom001,
     detect_dom002,
@@ -833,6 +1163,11 @@ DETECTORS = [
     detect_dom014,
     detect_dom015,
     detect_dom016,
+    detect_dom017,
+    detect_dom018,
+    detect_dom019,
+    detect_dom020,
+    detect_dom021,
 ]
 
 
@@ -863,6 +1198,11 @@ def run_rule_engine(
         # Code Analysis / Handle Exhaustion scope: Java / SSJS / XPages only.
         # LotusScript units are skipped entirely (no DOM / PERF / SEC / FORM on LS).
         if is_lotusscript_language(unit.language):
+            continue
+        # CSJS is browser-side — not C-API handle exhaustion
+        if is_client_javascript(
+            unit.language, event=unit.event, element_name=unit.element_name
+        ):
             continue
         for detector in DETECTORS:
             findings.extend(detector(unit))

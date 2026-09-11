@@ -7,11 +7,36 @@ from typing import Any, Literal
 
 Severity = Literal["CRITICAL", "HIGH", "MEDIUM", "LOW"]
 
-# LotusScript + Java/SSJS loop constructs
+# Rules that count toward the Handle Exhaustion Risk ring (not perf / ODA / dangerous recycle).
+HANDLE_EXHAUSTION_RULE_IDS = frozenset(
+    {
+        "DOM-001",
+        "DOM-002",
+        "DOM-003",
+        "DOM-006",
+        "DOM-007",
+        "DOM-010",
+        "DOM-011",
+        "DOM-012",
+        "DOM-013",
+        "DOM-014",
+        "DOM-015",
+        "DOM-016",
+        "DOM-017",
+        "DOM-018",
+        "DOM-019",
+        "DOM-021",
+        "DOM-BS-001",
+        "DOM-BS-002",
+        "DOM-OWN-001",
+    }
+)
+
+# LotusScript + Java/SSJS loop constructs (avoid matching "While" inside string prose)
 RE_ANY_LOOP = re.compile(
-    r"(?is)\b(?:"
-    r"Do\s+While|Do\s+Until|Forall|(?<![\w.])While\b|Wend\b|End\s+Forall|"
-    r"For\s+[A-Za-z_]\w*\s*=|"  # LotusScript For i =
+    r"(?is)(?:"
+    r"\bDo\s+While\b|\bDo\s+Until\b|\bForall\b|\bWend\b|\bEnd\s+Forall\b|"
+    r"\bWhile\s+[^\n'\"]|\bFor\s+[A-Za-z_]\w*\s*=|"  # LS While/For — not bare word in strings
     r"\bfor\s*\(|\bwhile\s*\("  # Java/SSJS
     r")",
 )
@@ -50,6 +75,10 @@ LOOP_SENSITIVE_HANDLE_RULES = frozenset(
         "DOM-014",
         "DOM-015",
         "DOM-016",
+        "DOM-017",
+        "DOM-018",
+        "DOM-019",
+        "DOM-021",
         "DOM-BS-001",
         "DOM-BS-002",
         "DOM-OWN-001",
@@ -166,6 +195,10 @@ def contributes_to_handle_exhaustion(finding: Any) -> bool:
         return False
     if rid.startswith(("PERF-", "SEC-", "FORM-")):
         return False
+    # Perf-ish / framework / dangerous-recycle rules stay in findings but do not
+    # drive the Handle Exhaustion Risk ring.
+    if rid.startswith("DOM-") and rid not in HANDLE_EXHAUSTION_RULE_IDS:
+        return False
     if not rid.startswith("DOM-"):
         return False
     return is_capi_handle_language(getattr(finding, "language", None))
@@ -239,10 +272,10 @@ def inventory_risk_severity(
         return "CRITICAL" if in_loop else "HIGH"
     if status == "PARTIAL_CLEANUP":
         return "CRITICAL" if in_loop else "MEDIUM"
-    # UNPROTECTED_ALLOCATION
+    # UNPROTECTED_ALLOCATION — at least as serious as partial outside loops
     if in_loop:
         return "CRITICAL"
-    return "LOW"
+    return "MEDIUM"
 
 
 def inventory_language_priority(

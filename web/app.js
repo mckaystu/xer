@@ -1454,7 +1454,7 @@ function renderInventoryDeepDive(fn) {
 
     <div class="diff-grid">
       <div class="diff-pane">
-        <div class="diff-label as-is">As-Is · highlight = L${escapeHtml(String(hitLine))}</div>
+        <div class="diff-label as-is">As-Is · orange = problem · green = every .recycle()/Delete</div>
         ${renderAsIsSnippet(fn)}
       </div>
       <div class="diff-pane">
@@ -1958,12 +1958,37 @@ function renderCodeAnalysis() {
   }
 }
 
+function enhanceSnippetHighlightLines(lines, hitLine) {
+  /** Mark problem hit + every .recycle()/Delete so misplaced cleanups stay visible. */
+  if (!Array.isArray(lines) || !lines.length) return lines;
+  const hit = hitLine != null && hitLine !== "" ? Number(hitLine) : null;
+  return lines.map((row) => {
+    const text = String(row.text || "");
+    const isCleanup = /\.\s*recycle\s*\(|\brecycle\s*\(|\bDelete\s+[A-Za-z_]\w*|\bCall\s+\w+\.Recycle\s*\(/i.test(
+      text
+    );
+    const isProblem =
+      !!row.highlight && row.kind !== "cleanup"
+        ? true
+        : hit != null && row.line != null && Number(row.line) === hit;
+    const kind = isProblem ? "problem" : isCleanup ? "cleanup" : row.kind || "";
+    return {
+      ...row,
+      highlight: isProblem || isCleanup || !!row.highlight,
+      kind,
+    };
+  });
+}
+
 function renderAsIsSnippet(finding) {
-  const lines = finding.code_snippet_lines;
+  const hitLine = finding.highlight_line || finding.line_number || finding.line || finding.start_line;
+  const lines = enhanceSnippetHighlightLines(finding.code_snippet_lines, hitLine);
   if (Array.isArray(lines) && lines.length) {
     return `<div class="diff-code snippet-lines" role="region" aria-label="As-Is code">${lines
       .map((row) => {
-        const cls = row.highlight ? "snippet-line is-highlight" : "snippet-line";
+        let cls = "snippet-line";
+        if (row.kind === "cleanup") cls += " is-recycle";
+        else if (row.highlight) cls += " is-highlight";
         return `<div class="${cls}"><span class="snippet-ln">${row.line}</span><span class="snippet-tx">${escapeHtml(row.text || "")}</span></div>`;
       })
       .join("")}</div>`;
@@ -2037,7 +2062,7 @@ function renderAuditDeepDive(finding) {
 
     <div class="diff-grid">
       <div class="diff-pane">
-        <div class="diff-label as-is">As-Is (vulnerable) · highlight = L${escapeHtml(String(hitLine))}</div>
+        <div class="diff-label as-is">As-Is · orange = problem · green = every .recycle()/Delete · hit L${escapeHtml(String(hitLine))}</div>
         ${renderAsIsSnippet(finding)}
       </div>
       <div class="diff-pane">

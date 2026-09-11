@@ -124,6 +124,31 @@ RULE_CATALOG: dict[str, dict[str, str]] = {
         "category": "C-API Handle Leaks & Object Recycling",
         "default_severity": "HIGH",
     },
+    "DOM-017": {
+        "title": "Un-Recycled EmbeddedObject / Attachment Handles",
+        "category": "C-API Handle Leaks & Object Recycling",
+        "default_severity": "HIGH",
+    },
+    "DOM-018": {
+        "title": "ViewEntry.getDocument() Without Document Recycle",
+        "category": "C-API Handle Leaks & Object Recycling",
+        "default_severity": "CRITICAL",
+    },
+    "DOM-019": {
+        "title": "Un-Recycled Multi-Document Collection Lookup",
+        "category": "C-API Handle Leaks & Object Recycling",
+        "default_severity": "HIGH",
+    },
+    "DOM-020": {
+        "title": "Recycle of Session or Current Database",
+        "category": "C-API Handle Leaks & Object Recycling",
+        "default_severity": "CRITICAL",
+    },
+    "DOM-021": {
+        "title": "Un-Recycled Stream Handle",
+        "category": "C-API Handle Leaks & Object Recycling",
+        "default_severity": "MEDIUM",
+    },
     "LS-DOM-008": {
         "title": "In-Loop Search Collection Leaks",
         "category": "LotusScript Handle Lifecycle",

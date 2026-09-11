@@ -51,9 +51,11 @@ public void walkOk(DocumentCollection coll) throws NotesException {
 
 // =============================================================================
 // @case id=dom003_missing_try
-// @expect DOM-003
+// @expect DOM-010
 // @lang java
 // =============================================================================
+// Missing try/finally scaffolding — DOM-010 is the preferred detector (DOM-003
+// defers when DOM-010 already covers the typed create assignment).
 // --- begin ---
 public void openDoc(Database db) throws NotesException {
   Document doc = db.getDocumentByUNID(unid);

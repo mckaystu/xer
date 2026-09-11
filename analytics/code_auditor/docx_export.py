@@ -453,11 +453,18 @@ def _add_function_block(doc: Document, idx: int, row: dict[str, Any], report: Au
             text = str(copy.get("text") or "")
             if alloc_re.search(text) and not re.search(r"\brecycle\s*\(|\bDelete\b", text, re.I):
                 copy["highlight"] = True
+                copy["kind"] = "problem"
             marked.append(copy)
-        structured = marked
+        from analytics.code_auditor.snippets import annotate_cleanup_highlights
+
+        structured = annotate_cleanup_highlights(marked)
+    elif structured:
+        from analytics.code_auditor.snippets import annotate_cleanup_highlights
+
+        structured = annotate_cleanup_highlights(structured)
     _add_code_block(
         doc,
-        "Bad code (yellow = problem line; surrounding lines show try/finally context):",
+        "Bad code (orange/yellow = problem; green = every .recycle()/Delete — even if misplaced):",
         as_is,
         lines=structured,
         highlight_line=int(hl) if hl not in (None, "", 0, "0") else None,
@@ -529,12 +536,20 @@ def build_code_analysis_rubric_docx() -> bytes:
         "inference passes for Domino C-API handle exhaustion on Java / SSJS / XPages. "
         "It is generated from the product rule catalog (not a frozen copy)."
     )
+    scope = doc.add_paragraph()
+    scope_run = scope.add_run(
+        "Handle Exhaustion = Java / SSJS / XPages only. LotusScript is out of scope for "
+        "C-API handle-table exhaustion (LotusScript handle detectors are not wired). "
+        "FORM-* (@DbLookup/@DbColumn / formula secrets) is also omitted — those are not "
+        "object-handle / recycle issues."
+    )
+    scope_run.bold = True
 
     # —— Pipeline ——
     doc.add_heading("1. Analysis pipeline", level=1)
     for step in (
-        "Extract Java / SSJS / XPages (and formula) units from the DXL / application graph.",
-        "Run deterministic static search rules (DOM-*, PERF-*, SEC-*, FORM-*, DOM-OWN-*).",
+        "Extract Java / SSJS / XPages code units from the DXL / application graph.",
+        "Run deterministic static search rules (DOM-*, PERF-*, SEC-*, DOM-OWN-*).",
         "Build the Function & Recycle Inventory (handle allocation vs cleanup per function).",
         "When OPENAI_API_KEY is set: run AI Pass 1–3 (FP filter, blind spots, ownership).",
         "Apply confidence gate (default XER_AI_CONFIDENCE_MIN=75) and human triage overrides.",
@@ -575,6 +590,42 @@ def build_code_analysis_rubric_docx() -> bytes:
     ):
         doc.add_paragraph(line, style="List Bullet")
 
+    doc.add_heading("Handle risk hierarchy (object types & scenarios)", level=2)
+    doc.add_paragraph(
+        "Not all Domino objects are equal. Native C-API pressure depends on object type, "
+        "whether allocation is inside a loop, and whether the handle is shared across requests."
+    )
+    risk_rows = [
+        (
+            "Worst — exhausts HTTP/agent handle table fast",
+            "Document / ViewEntry.getDocument() inside getNext* walks; ViewNavigator / "
+            "ViewEntryCollection; DocumentCollection from search / getAllDocumentsByKey; "
+            "nested loops (view × docs × items/attachments).",
+        ),
+        (
+            "High — multi-handle or shared-lifetime",
+            "Item / RichTextItem / MIMEEntity / EmbeddedObject in loops; Stream per document; "
+            "static or sessionScope/applicationScope live handles; recycling Session / current Database.",
+        ),
+        (
+            "Medium — hygiene / NIF cost",
+            "One-shot Document/View without finally; createDateTime/Name temps; getView inside loops; "
+            "GetNthDocument O(n²) walks.",
+        ),
+        (
+            "Special — framework-owned",
+            "OpenNTF Domino API (ODA): do not manually recycle. XPages `session` / `database` globals: "
+            "do not recycle.",
+        ),
+    ]
+    risk_table = doc.add_table(rows=1 + len(risk_rows), cols=2)
+    risk_table.style = "Table Grid"
+    risk_table.rows[0].cells[0].text = "Tier"
+    risk_table.rows[0].cells[1].text = "Typical objects / scenarios"
+    for i, (tier, detail) in enumerate(risk_rows, start=1):
+        risk_table.rows[i].cells[0].text = tier
+        risk_table.rows[i].cells[1].text = detail
+
     # —— Static search rules ——
     doc.add_heading("3. Static search rules", level=1)
     doc.add_paragraph(
@@ -586,6 +637,9 @@ def build_code_analysis_rubric_docx() -> bytes:
         # Omit LotusScript — not a C-API handle-table exhaustion concern.
         if rid.startswith("LS-DOM") or (meta_r.get("category") or "") == "LotusScript Handle Lifecycle":
             continue
+        # Omit Formula Quality — @DbLookup / secrets are not Domino object-handle issues.
+        if rid.startswith("FORM-") or (meta_r.get("category") or "") == "Formula Quality":
+            continue
         by_cat[meta_r.get("category") or "Other"].append((rid, meta_r))
 
     preferred = [
@@ -596,7 +650,6 @@ def build_code_analysis_rubric_docx() -> bytes:
         "High-Memory & Expensive Data Patterns",
         "Performance & NIF Indexing",
         "Application Security",
-        "Formula Quality",
         "AI Discrepancy & Blind Spots",
     ]
     categories = [c for c in preferred if c in by_cat] + sorted(
@@ -632,7 +685,17 @@ def build_code_analysis_rubric_docx() -> bytes:
 
     # Sample guides for top handle rules
     doc.add_heading("Example remediation guides (Java)", level=2)
-    for rid in ("DOM-001", "DOM-002", "DOM-010", "DOM-013", "PERF-001", "DOM-OWN-001"):
+    for rid in (
+        "DOM-001",
+        "DOM-002",
+        "DOM-010",
+        "DOM-013",
+        "DOM-017",
+        "DOM-018",
+        "DOM-020",
+        "PERF-001",
+        "DOM-OWN-001",
+    ):
         if rid not in RULE_CATALOG:
             continue
         p = doc.add_paragraph()

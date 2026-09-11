@@ -105,6 +105,26 @@ PROBLEM_BREAKDOWNS: dict[str, str] = {
     "DOM-016": (
         "db.search / FTSearch inside a loop returns a collection that is never recycled."
     ),
+    "DOM-017": (
+        "An EmbeddedObject / attachment handle is acquired (getEmbeddedObject / getObjects) "
+        "without `.recycle()`. Attachment loops pin C-API slots per file."
+    ),
+    "DOM-018": (
+        "ViewEntry.getDocument() materializes a full Document handle. Without recycling the "
+        "Document each iteration (and the entry), navigator walks exhaust the handle table quickly."
+    ),
+    "DOM-019": (
+        "getAllDocumentsByKey / getAllUnreadDocuments / FTSearchRange returns a DocumentCollection "
+        "that is never recycled — many child handles stay pinned."
+    ),
+    "DOM-020": (
+        "Code calls `.recycle()` on Session or the current Database. Those are platform-shared "
+        "handles; recycling them can crash the HTTP task or invalidate subsequent requests."
+    ),
+    "DOM-021": (
+        "A Stream / NotesStream is created without `.recycle()`. Native I/O handles leak, "
+        "especially when streams are opened per document."
+    ),
     "LS-DOM-008": (
         "Search / FTSearch inside a LotusScript loop without Delete of the returned collection."
     ),
@@ -235,6 +255,21 @@ REMEDIATION_GUIDES: dict[str, dict[str, str]] = {
     "DOM-016": {
         "lotusscript": "Delete the DocumentCollection from Search/FTSearch before the next iteration.",
         "java": "collection.recycle() after processing each in-loop search result.",
+    },
+    "DOM-017": {
+        "java": "Recycle each EmbeddedObject in finally after reading; do not leave attachments open across loop iterations.",
+    },
+    "DOM-018": {
+        "java": "After entry.getDocument(), process then doc.recycle() every iteration; recycle the ViewEntry before getNextEntry.",
+    },
+    "DOM-019": {
+        "java": "Walk the DocumentCollection with next-doc recycle, then collection.recycle() when finished.",
+    },
+    "DOM-020": {
+        "java": "Never recycle Session or getCurrentDatabase()/XPages database — only recycle Database handles you opened via getDatabase.",
+    },
+    "DOM-021": {
+        "java": "session.createStream() … write/read … stream.recycle() in finally.",
     },
     "LS-DOM-008": {
         "lotusscript": "Delete the Search/FTSearch collection before continuing the outer loop.",
@@ -924,6 +959,68 @@ def remediation_template(
             "  if (coll != null) coll.recycle();\n"
             "}"
         ),
+        "DOM-017": (
+            "EmbeddedObject emb = null;\n"
+            "try {\n"
+            "  emb = rtitem.getEmbeddedObject(name);\n"
+            "  // read bytes / extract\n"
+            "} finally {\n"
+            "  if (emb != null) emb.recycle();\n"
+            "}"
+        ),
+        "DOM-018": (
+            "ViewEntry entry = nav.getFirst();\n"
+            "while (entry != null) {\n"
+            "  ViewEntry next = nav.getNext(entry);\n"
+            "  Document doc = null;\n"
+            "  try {\n"
+            "    doc = entry.getDocument();\n"
+            "    // process doc\n"
+            "  } finally {\n"
+            "    if (doc != null) doc.recycle();\n"
+            "    entry.recycle();\n"
+            "  }\n"
+            "  entry = next;\n"
+            "}"
+        ),
+        "DOM-019": (
+            "DocumentCollection coll = null;\n"
+            "try {\n"
+            "  coll = view.getAllDocumentsByKey(key, true);\n"
+            "  Document doc = coll.getFirstDocument();\n"
+            "  while (doc != null) {\n"
+            "    Document next = coll.getNextDocument(doc);\n"
+            "    try { /* work */ } finally { doc.recycle(); }\n"
+            "    doc = next;\n"
+            "  }\n"
+            "} finally {\n"
+            "  if (coll != null) coll.recycle();\n"
+            "}"
+        ),
+        "DOM-020": (
+            "// DO NOT recycle platform handles:\n"
+            "// session.recycle();              // BAD\n"
+            "// database.recycle();             // BAD in XPages (current NSF)\n"
+            "// getCurrentDatabase().recycle(); // BAD\n"
+            "\n"
+            "// Only recycle databases you opened:\n"
+            "Database other = null;\n"
+            "try {\n"
+            "  other = session.getDatabase(server, path);\n"
+            "  // work\n"
+            "} finally {\n"
+            "  if (other != null) other.recycle();\n"
+            "}"
+        ),
+        "DOM-021": (
+            "Stream stream = null;\n"
+            "try {\n"
+            "  stream = session.createStream();\n"
+            "  // write / read\n"
+            "} finally {\n"
+            "  if (stream != null) stream.recycle();\n"
+            "}"
+        ),
         "PERF-001": (
             "view.setAutoUpdate(false);\n"
             "try {\n"
@@ -1315,16 +1412,14 @@ def extract_line_window(
             r"\bfinally\b|\.recycle\s*\(|\brecycle\s*\(|\bDelete\b",
             re.I,
         )
-        # Extend downward to the last cleanup marker within max_span of focus.
-        search_end = min(len(lines), rel + max_span + 1)
-        last_cleanup = -1
-        for i in range(rel, search_end):
-            if cleanup_re.search(lines[i] or ""):
-                last_cleanup = i
-        if last_cleanup >= 0:
-            end_idx = max(end_idx, min(len(lines), last_cleanup + 3))
-        # Also peek a bit upward for an opening try {
+        # Include every cleanup marker near the focus (not only the last one below).
         search_start = max(0, rel - max_span)
+        search_end = min(len(lines), rel + max_span + 1)
+        for i in range(search_start, search_end):
+            if cleanup_re.search(lines[i] or ""):
+                start_idx = min(start_idx, i)
+                end_idx = max(end_idx, min(len(lines), i + 1))
+        # Also peek a bit upward for an opening try {
         first_try = -1
         for i in range(rel, search_start - 1, -1):
             if re.search(r"\btry\s*\{", lines[i] or "", re.I):
@@ -1351,11 +1446,49 @@ def extract_line_window(
         numbered.append(f"{abs_line:>6}{marker}| {text}")
         structured.append({"line": abs_line, "text": text, "highlight": is_hit})
 
+    structured = annotate_cleanup_highlights(structured)
+    # Keep focus marker for numbered text even when recycle lines are also flagged
     snippet = "\n".join(numbered)
     line_start = base_line + start_idx
     line_end = base_line + end_idx - 1
     highlight = rel - start_idx
     return snippet, line_start, line_end, highlight, structured
+
+
+_RE_CLEANUP_LINE = re.compile(
+    r"(?i)(?:\.\s*recycle\s*\(|\brecycle\s*\(|\bDelete\s+[A-Za-z_]\w*|\bCall\s+\w+\.Recycle\s*\()",
+)
+
+
+def annotate_cleanup_highlights(
+    structured: list[dict[str, Any]] | None,
+) -> list[dict[str, Any]]:
+    """Flag every .recycle() / Delete line so misplaced cleanups stay visible.
+
+    Problem hit lines keep ``kind=problem``; cleanup-only lines use ``kind=cleanup``.
+    Both set ``highlight=True`` for Word / UI consumers.
+    """
+    if not structured:
+        return []
+    out: list[dict[str, Any]] = []
+    for row in structured:
+        if not isinstance(row, dict):
+            continue
+        copy = dict(row)
+        text = str(copy.get("text") or "")
+        is_cleanup = bool(_RE_CLEANUP_LINE.search(text))
+        is_problem = bool(copy.get("highlight")) and copy.get("kind") != "cleanup"
+        if is_problem and is_cleanup:
+            copy["highlight"] = True
+            copy["kind"] = "problem"
+        elif is_problem:
+            copy["highlight"] = True
+            copy["kind"] = copy.get("kind") or "problem"
+        elif is_cleanup:
+            copy["highlight"] = True
+            copy["kind"] = "cleanup"
+        out.append(copy)
+    return out
 
 
 def attach_snippet_fields(
