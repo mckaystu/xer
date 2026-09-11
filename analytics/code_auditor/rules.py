@@ -384,16 +384,23 @@ def detect_dom004(unit: CodeUnit) -> list[Finding]:
                 evidence=_snippet(unit.body, match.start()),
                 confidence=96,
                 impact=(
-                    "OpenNTF Domino API manages recycle automatically. Manual .recycle() destroys shared "
-                    "underlying handles, causing double-recycle exceptions, thread stalls, and Metaspace churn."
+                    "OpenNTF Domino API *may* dispose wrappers at request end, but this auditor "
+                    "assumes ODA auto-lifecycle is unreliable. Manual .recycle() on ODA objects "
+                    "can still double-free if an outer ODA session later disposes the same native. "
+                    "Prefer explicit try/finally recycle on lotus.domino handles, or verify ODA "
+                    "session disposal is actually configured — never assume cleanup."
                 ),
                 remediation=(
-                    "// Remove manual recycle when using org.openntf.domino.*\n"
-                    "// ODA AutoMime / Factory handles disposal at the end of the request.\n"
-                    "Document doc = db.getDocumentByUNID(unid);\n"
-                    "String subject = doc.getItemValueString(\"Subject\");"
+                    "// Prefer explicit lifecycle (ODA auto-dispose is not trusted here):\n"
+                    "lotus.domino.Document doc = null;\n"
+                    "try {\n"
+                    "  doc = database.getDocumentByUNID(unid);\n"
+                    "  String subject = doc.getItemValueString(\"Subject\");\n"
+                    "} finally {\n"
+                    "  if (doc != null) doc.recycle();\n"
+                    "}"
                 ),
-                action="Delete explicit .recycle() calls on ODA-wrapped objects.",
+                action="Do not rely on ODA auto-dispose; use explicit finally recycle (or verified cleanup).",
             )
         )
     return findings
@@ -931,12 +938,47 @@ RE_BAD_SESSION_DB_RECYCLE = re.compile(
     r"""(?:(?P<sess>\b(?:session|dominoSession|notesSession)\b)\s*\.\s*recycle\s*\()"""
     r"""|(?:getCurrentDatabase\s*\([^)]*\)\s*\.\s*recycle\s*\()"""
     r"""|(?P<cdb>\b(?:currentDatabase|currDb|currentDb)\b)\s*\.\s*recycle\s*\("""
-    r"""|(?P<xspDb>\bdatabase\b)\s*\.\s*recycle\s*\(""",
+    r"""|(?P<xspDb>\bdatabase\b)\s*\.\s*recycle\s*\("""
+    r"""|(?P<naf>\bdominoNAF\b)\s*\.\s*recycle\s*\(""",
     re.I | re.X,
 )
 RE_STREAM_JAVA = re.compile(
     r"""(?:\b(?:Stream|NotesStream)\b\s+(?P<var>\w+)\s*=)"""
     r"""|(?P<var2>\w+)\s*=\s*\w+\s*\.\s*(?P<meth>createStream|CreateStream)\s*\(""",
+    re.I | re.X,
+)
+
+# DOM-022: parent collection/vector/stream wrapper after children are recycled
+RE_WRAPPER_ALLOC = re.compile(
+    r"""(?:\b(?:DocumentCollection|ViewEntryCollection|ViewNavigator|NotesDocumentCollection|
+        NotesViewEntryCollection|NotesViewNavigator)\b\s+(?P<var>\w+)\s*=)"""
+    r"""|(?P<var2>\w+)\s*=\s*\w+\s*\.\s*
+        (?P<meth>search|FTSearch|FTSearchRange|getAllDocumentsByKey|getAllUnreadDocuments|
+            getAllEntries|createViewNav|createViewNavFrom|getAllEntriesByKey|
+            getItemValueDateTimeArray)\s*\("""
+    r"""|(?:\bVector\b\s+(?P<vec>\w+)\s*=\s*\w+\s*\.\s*
+        (?P<vmeth>getItemValueDateTimeArray|getItemValue|getColumnValues)\s*\()""",
+    re.I | re.X,
+)
+
+# DOM-023: bean / scope persistence of live NotesBase handles
+RE_BEAN_HANDLE_FIELD = re.compile(
+    r"""(?P<mod>private|protected|public)\s+(?:static\s+)?(?:transient\s+)?
+        (?:lotus\.domino\.)?
+        (?P<type>Session|Database|Document|View|ViewEntry|DocumentCollection|ViewEntryCollection|
+            ViewNavigator|NotesBase|DateTime|Item|MIMEEntity|EmbeddedObject|Stream)\s+
+        (?P<field>\w+)\s*[;=]""",
+    re.I | re.X,
+)
+RE_BEAN_MARKER = re.compile(
+    r"""@ManagedBean\b|@Name\s*\(|@SessionScoped\b|@ViewScoped\b|@ApplicationScoped\b|
+        @RequestScoped\b|faces-config\.xml|ManagedBean|sessionScope\.(?:put|set)|
+        viewScope\.(?:put|set)|applicationScope\.(?:put|set)""",
+    re.I | re.X,
+)
+RE_SCOPE_PUT_HANDLE = re.compile(
+    r"""(?:sessionScope|viewScope|applicationScope)\s*\.\s*(?:put|set)\s*\(\s*[^,]+,\s*
+        (?P<expr>[^)]*(?:Document|Database|View|Session|ViewEntry|doc|db|view)\w*)""",
     re.I | re.X,
 )
 
@@ -1078,6 +1120,9 @@ def detect_dom020(unit: CodeUnit) -> list[Finding]:
     findings: list[Finding] = []
     for match in RE_BAD_SESSION_DB_RECYCLE.finditer(unit.body):
         gd = match.groupdict()
+        if gd.get("naf"):
+            # Covered by DOM-024 (dominoNAF) — avoid double-reporting
+            continue
         if gd.get("xspDb"):
             # Bare `database.recycle()` — XPages/SSJS antipattern; skip normal Java locals.
             if lang_n not in {"ssjs", "javascript", "xpages", "jscript"}:
@@ -1146,6 +1191,161 @@ def detect_dom021(unit: CodeUnit) -> list[Finding]:
     return findings
 
 
+def detect_dom022(unit: CodeUnit) -> list[Finding]:
+    """Children recycled in a walk, but parent Collection/Vector/Navigator left open."""
+    if not _java_like_unit(unit):
+        return []
+    findings: list[Finding] = []
+    seen: set[str] = set()
+    for match in RE_WRAPPER_ALLOC.finditer(unit.body):
+        gd = match.groupdict()
+        var = gd.get("var") or gd.get("var2") or gd.get("vec")
+        if not var or var in seen:
+            continue
+        meth = gd.get("meth") or gd.get("vmeth") or "collection"
+        if _var_recycled(unit.body, var):
+            continue
+        after = unit.body[match.end() :]
+        child_recycle = bool(
+            re.search(
+                r"""(?:\b(?:doc|document|entry|ve|item|dt|dateTime|next)\w*\s*\.\s*recycle\s*\()"""
+                r"""|(?:\.recycle\s*\(\s*\))""",
+                after,
+                re.I | re.X,
+            )
+        )
+        walk = bool(
+            re.search(
+                r"getNext(?:Document|Entry|Category)\s*\(|getFirst(?:Document|Entry)\s*\(",
+                after,
+                re.I,
+            )
+        )
+        if not (child_recycle and walk):
+            continue
+        before = unit.body[max(0, match.start() - 400) : match.start()]
+        in_loop = bool(re.search(r"\b(?:for|while)\b", before + after[:200], re.I))
+        seen.add(var)
+        line = _line_of(unit.body, match.start(), unit.start_line)
+        findings.append(
+            _finding(
+                "DOM-022",
+                unit,
+                line=line,
+                evidence=_snippet(unit.body, match.start()),
+                confidence=90 if in_loop else 84,
+                in_loop=in_loop,
+                impact=(
+                    f"Wrapper `{var}` from `{meth}` is left un-recycled after child handles are "
+                    "recycled in the walk. DocumentCollection / ViewEntryCollection / ViewNavigator / "
+                    "DateTime Vector parents still pin native slots until the wrapper is recycled in finally."
+                ),
+                remediation=remediation_template("DOM-022", unit.language, has_loop=in_loop),
+                action=f"After the loop, recycle wrapper `{var}` in a finally block.",
+                handle_lifecycle_warning=(
+                    f"Line {line}: collection/vector wrapper `{var}` never recycled after child cleanup."
+                ),
+            )
+        )
+    return findings
+
+
+def detect_dom023(unit: CodeUnit) -> list[Finding]:
+    """Managed Bean / scope map persists live lotus.domino.NotesBase across requests."""
+    if not _java_like_unit(unit):
+        return []
+    findings: list[Finding] = []
+    body = unit.body or ""
+    beanish = bool(RE_BEAN_MARKER.search(body)) or any(
+        tok in (unit.element_name or "").lower()
+        for tok in ("bean", "controller", "managed", "scope")
+    )
+
+    if beanish:
+        for match in RE_BEAN_HANDLE_FIELD.finditer(body):
+            field = match.group("field")
+            typ = match.group("type")
+            line_start = body.rfind("\n", 0, match.start()) + 1
+            prefix = body[line_start : match.start()]
+            if prefix.count("{") or prefix.strip().startswith("//"):
+                continue
+            line = _line_of(body, match.start(), unit.start_line)
+            findings.append(
+                _finding(
+                    "DOM-023",
+                    unit,
+                    line=line,
+                    evidence=_snippet(body, match.start()),
+                    confidence=88,
+                    impact=(
+                        f"Member field `{field}` ({typ}) holds a live Domino handle on a Managed Bean / "
+                        "long-lived class. XPages scope persistence across HTTP requests pins C-API memory "
+                        "and shares unsafe state between users/threads."
+                    ),
+                    remediation=remediation_template("DOM-023", unit.language),
+                    action=f"Store UNID/strings/DTOs in `{field}`; fetch handles per request.",
+                    handle_lifecycle_warning=(
+                        f"Line {line}: scoped/bean field `{field}` retains live `{typ}` handle."
+                    ),
+                )
+            )
+
+    for match in RE_SCOPE_PUT_HANDLE.finditer(body):
+        line = _line_of(body, match.start(), unit.start_line)
+        findings.append(
+            _finding(
+                "DOM-023",
+                unit,
+                line=line,
+                evidence=_snippet(body, match.start()),
+                confidence=90,
+                impact=(
+                    "Putting a live Domino handle into sessionScope/viewScope/applicationScope retains "
+                    "native C-API memory for the lifetime of the scope and can leak across requests."
+                ),
+                remediation=remediation_template("DOM-023", unit.language),
+                action="Put UNIDs or serializable values into scopes — never live NotesBase instances.",
+                handle_lifecycle_warning=f"Line {line}: scope map stores a live Domino handle.",
+            )
+        )
+    return findings
+
+
+def detect_dom024(unit: CodeUnit) -> list[Finding]:
+    """CRITICAL: recycle of platform-owned globals including dominoNAF.
+
+    Inverse policy (AI + docs): do NOT require .recycle() on session /
+    XPages ``database`` / getCurrentDatabase() / dominoNAF.
+    """
+    if not _java_like_unit(unit):
+        return []
+    findings: list[Finding] = []
+    for match in RE_BAD_SESSION_DB_RECYCLE.finditer(unit.body):
+        gd = match.groupdict()
+        if not gd.get("naf"):
+            continue
+        target = gd.get("naf") or "dominoNAF"
+        line = _line_of(unit.body, match.start(), unit.start_line)
+        findings.append(
+            _finding(
+                "DOM-024",
+                unit,
+                line=line,
+                evidence=_snippet(unit.body, match.start()),
+                confidence=97,
+                impact=(
+                    f"Recycling platform-owned `{target}` is forbidden. session / XPages database / "
+                    "getCurrentDatabase() / dominoNAF are framework-managed; recycling them can crash "
+                    "nHTTP. Conversely, missing .recycle() on those globals is NOT a leak."
+                ),
+                remediation=remediation_template("DOM-024", unit.language),
+                action=f"Remove `{target}.recycle()`; never dispose platform globals.",
+                handle_lifecycle_warning=f"Line {line}: illegal recycle of platform global `{target}`.",
+            )
+        )
+    return findings
+
+
 DETECTORS = [
     detect_dom001,
     detect_dom002,
@@ -1168,6 +1368,9 @@ DETECTORS = [
     detect_dom019,
     detect_dom020,
     detect_dom021,
+    detect_dom022,
+    detect_dom023,
+    detect_dom024,
 ]
 
 

@@ -613,9 +613,9 @@ def build_code_analysis_rubric_docx() -> bytes:
             "GetNthDocument O(n²) walks.",
         ),
         (
-            "Special — framework-owned",
-            "OpenNTF Domino API (ODA): do not manually recycle. XPages `session` / `database` globals: "
-            "do not recycle.",
+            "Special — platform globals vs ODA",
+            "XPages `session` / `database` / dominoNAF: do not recycle. ODA (org.openntf.domino): "
+            "do NOT trust auto-dispose — require explicit finally recycle like lotus.domino.",
         ),
     ]
     risk_table = doc.add_table(rows=1 + len(risk_rows), cols=2)
@@ -680,7 +680,9 @@ def build_code_analysis_rubric_docx() -> bytes:
         "variable, release with .recycle() in finally on every path."
     )
     doc.add_paragraph(
-        "ODA (org.openntf.domino): do not manually recycle — framework owns lifecycle."
+        "ODA (org.openntf.domino): do NOT trust auto-dispose in this environment — require "
+        "explicit .recycle() in finally (same as lotus.domino). DOM-004 flags dual-lifecycle "
+        "conflict when ODA code also calls recycle."
     )
 
     # Sample guides for top handle rules
@@ -693,6 +695,9 @@ def build_code_analysis_rubric_docx() -> bytes:
         "DOM-017",
         "DOM-018",
         "DOM-020",
+        "DOM-022",
+        "DOM-023",
+        "DOM-024",
         "PERF-001",
         "DOM-OWN-001",
     ):
@@ -715,13 +720,20 @@ def build_code_analysis_rubric_docx() -> bytes:
         "Input: static-rule findings + surrounding code. Verdicts:"
     )
     for line in (
-        "FALSE_POSITIVE — cleanup is clearly present or framework-owned (ODA, helper recycle, etc.).",
-        "VERIFIED_NON_LOOP — real issue but one-shot / non-loop → demote to LOW hygiene.",
+        "FALSE_POSITIVE — ONLY with finally-block .recycle() of every named handle. "
+        "Never on speculation. Never because the type is org.openntf.domino (ODA).",
+        "CRITICAL GUARDRAIL — DOM-001 / DOM-002 / DOM-015 / DOM-018 / DOM-022–024 cannot be "
+        "FALSE_POSITIVE without finally-recycle evidence (host-enforced).",
+        "VERIFIED_NON_LOOP — real issue but one-shot / non-loop → demote to LOW hygiene "
+        "(blocked for getNext* walks and CRITICAL loop paths).",
         "VERIFIED — real leak / anti-pattern, especially inside collection loops.",
+        "ODA ASSUMPTION — treat ODA auto-dispose as unreliable; missing recycle on ODA types "
+        "is still a leak. Platform globals (session/database/dominoNAF) must not be recycled.",
     ):
         doc.add_paragraph(line, style="List Bullet")
     doc.add_paragraph(
-        "Conservative: only mark FALSE_POSITIVE when cleanup is clear. Emits confidence 0–100."
+        "Conservative: only mark FALSE_POSITIVE when cleanup is clear. Emits confidence 0–100 "
+        "(default gate 75%; CRITICAL loop blind spots may use a slightly lower floor)."
     )
 
     doc.add_heading("Pass 2 — Blind-spot detector (DOM-BS-001)", level=2)

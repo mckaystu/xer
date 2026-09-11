@@ -24,8 +24,10 @@ PROBLEM_BREAKDOWNS: dict[str, str] = {
         "occurs mid-method, handles remain pinned on the thread."
     ),
     "DOM-004": (
-        "Code using the OpenNTF Domino API still calls `.recycle()` manually. ODA owns the "
-        "lifecycle — manual recycle can destroy shared handles and stall threads."
+        "Code uses OpenNTF Domino API (ODA) and also calls `.recycle()`. ODA *claims* "
+        "request-end disposal, but this environment assumes ODA may not run — dual lifecycle "
+        "risk (leak if ODA fails; double-free if ODA later disposes). Prefer explicit "
+        "lotus.domino + finally recycle, and do not treat ODA as proof of cleanup."
     ),
     "DOM-005": (
         "Raw `lotus.domino` objects are mixed with ODA APIs without `Factory.fromLotus()`, "
@@ -124,6 +126,19 @@ PROBLEM_BREAKDOWNS: dict[str, str] = {
     "DOM-021": (
         "A Stream / NotesStream is created without `.recycle()`. Native I/O handles leak, "
         "especially when streams are opened per document."
+    ),
+    "DOM-022": (
+        "A DocumentCollection / ViewEntryCollection / ViewNavigator / DateTime Vector is walked "
+        "with child `.recycle()`, but the parent wrapper is never recycled in finally — native "
+        "slots stay pinned after the loop."
+    ),
+    "DOM-023": (
+        "An XPages Managed Bean or sessionScope/viewScope/applicationScope retains a live "
+        "lotus.domino.NotesBase (Document/Database/View/…) member across HTTP requests."
+    ),
+    "DOM-024": (
+        "Code calls `.recycle()` on platform-owned globals (session, getCurrentDatabase / XPages "
+        "`database`, or dominoNAF). Those must never be recycled; missing recycle on them is NOT a leak."
     ),
     "LS-DOM-008": (
         "Search / FTSearch inside a LotusScript loop without Delete of the returned collection."
@@ -270,6 +285,24 @@ REMEDIATION_GUIDES: dict[str, dict[str, str]] = {
     },
     "DOM-021": {
         "java": "session.createStream() … write/read … stream.recycle() in finally.",
+    },
+    "DOM-022": {
+        "java": (
+            "Recycle each child Document/Entry/DateTime in the loop, then recycle the parent "
+            "DocumentCollection / ViewEntryCollection / ViewNavigator / Vector in finally."
+        ),
+    },
+    "DOM-023": {
+        "java": (
+            "Do not store Document/Database/View on bean fields or in sessionScope. "
+            "Cache UNIDs / DTOs; open handles per request and recycle in finally."
+        ),
+    },
+    "DOM-024": {
+        "java": (
+            "Never recycle session, getCurrentDatabase()/XPages database, or dominoNAF. "
+            "Only recycle Database handles you opened via getDatabase."
+        ),
     },
     "LS-DOM-008": {
         "lotusscript": "Delete the Search/FTSearch collection before continuing the outer loop.",
@@ -890,14 +923,24 @@ def remediation_template(
             "doc = nextDoc;"
         ),
         "DOM-004": (
-            "// Remove manual recycle when using org.openntf.domino.*\n"
-            "Document doc = db.getDocumentByUNID(unid);\n"
-            "String subject = doc.getItemValueString(\"Subject\");\n"
-            "// ODA disposes handles at end of request — do not call doc.recycle()"
+            "// Do not trust ODA auto-dispose — use explicit finally recycle:\n"
+            "lotus.domino.Document doc = null;\n"
+            "try {\n"
+            "  doc = database.getDocumentByUNID(unid);\n"
+            "  String subject = doc.getItemValueString(\"Subject\");\n"
+            "} finally {\n"
+            "  if (doc != null) doc.recycle();\n"
+            "}"
         ),
         "DOM-005": (
-            "org.openntf.domino.Document doc =\n"
-            "    Factory.fromLotus(lotusDoc, Document.class, database);"
+            "// Prefer lotus.domino + explicit recycle over mixed ODA/lotus boundaries.\n"
+            "lotus.domino.Document doc = null;\n"
+            "try {\n"
+            "  doc = database.getDocumentByUNID(unid);\n"
+            "  // work\n"
+            "} finally {\n"
+            "  if (doc != null) doc.recycle();\n"
+            "}"
         ),
         "DOM-006": (
             "// Do not store Session/Database/Document/View in static fields.\n"
@@ -1019,6 +1062,50 @@ def remediation_template(
             "  // write / read\n"
             "} finally {\n"
             "  if (stream != null) stream.recycle();\n"
+            "}"
+        ),
+        "DOM-022": (
+            "DocumentCollection coll = null;\n"
+            "try {\n"
+            "  coll = db.FTSearch(query, 0);\n"
+            "  Document doc = coll.getFirstDocument();\n"
+            "  while (doc != null) {\n"
+            "    Document next = coll.getNextDocument(doc);\n"
+            "    try { /* work */ } finally { doc.recycle(); }\n"
+            "    doc = next;\n"
+            "  }\n"
+            "} finally {\n"
+            "  if (coll != null) coll.recycle(); // parent wrapper\n"
+            "}"
+        ),
+        "DOM-023": (
+            "// BAD — bean field / scope holds live handle:\n"
+            "// private Document orderDoc;\n"
+            "// sessionScope.put(\"order\", doc);\n"
+            "\n"
+            "// GOOD — persist identifiers only:\n"
+            "sessionScope.put(\"orderUnid\", doc.getUniversalID());\n"
+            "Document doc = null;\n"
+            "try {\n"
+            "  doc = database.getDocumentByUNID((String) sessionScope.get(\"orderUnid\"));\n"
+            "  // work\n"
+            "} finally {\n"
+            "  if (doc != null) doc.recycle();\n"
+            "}"
+        ),
+        "DOM-024": (
+            "// DO NOT recycle platform handles:\n"
+            "// session.recycle();\n"
+            "// database.recycle();             // XPages current NSF\n"
+            "// getCurrentDatabase().recycle();\n"
+            "// dominoNAF.recycle();\n"
+            "\n"
+            "// Only recycle databases you opened:\n"
+            "Database other = null;\n"
+            "try {\n"
+            "  other = session.getDatabase(server, path);\n"
+            "} finally {\n"
+            "  if (other != null) other.recycle();\n"
             "}"
         ),
         "PERF-001": (

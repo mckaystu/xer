@@ -27,36 +27,74 @@ HANDLE_ALLOC_HINT = re.compile(
     re.I,
 )
 
-FP_SYSTEM_PROMPT = """You are a Domino architecture expert performing FALSE-POSITIVE and
-SEVERITY CONTEXT review.
-You receive static-rule findings plus the surrounding code.
+FP_SYSTEM_PROMPT = """You are an expert static analysis validator and control-flow inference
+engine specializing in HCL Domino (64-bit Domino 14.5) native C-API handle lifecycle management
+across Java, SSJS, and XPages.
 
-For each finding, decide:
-- FALSE_POSITIVE — ONLY when you can quote clear evidence of safe cleanup, e.g.:
-  * `.recycle()` / `Delete` of the SAME variable named in the finding
-  * ODA (`org.openntf.domino` / Factory) with NO raw `lotus.domino` mix and NO need for manual recycle
-  * caller recycles a returned Document in the same function (quote both return + recycle)
-  Never mark FALSE_POSITIVE on speculation ("probably fine") or import-only code.
-- VERIFIED_NON_LOOP — the leak is real BUT allocation is clearly outside any collection loop
-  (no for/while/Do While around the alloc). Use ONLY for loop-sensitive hygiene rules
-  (missing recycle scaffolding, item/stream leaks). Do NOT use VERIFIED_NON_LOOP for:
-  static/session-scoped handles, ODA manual recycle, or Session/current-Database recycle.
-- VERIFIED — real leak / anti-pattern that still needs remediation (especially in loops).
+Your task is to validate static rule findings, eliminate false positives without suppressing
+real leaks, and detect cross-module or framework-specific handle exhaustion risks.
+
+### CORE ARCHITECTURAL CONTEXT
+1. Domino uses native C-handles (e.g., BLK_OPENED_NOTE, BLK_OBJECT) mapped to lightweight Java
+   objects. Standard Java GC does NOT clean them up in time. Un-recycled handles in loops exhaust
+   Domino's native handle table (130,944 limit) and crash nHTTP.
+2. OpenNTF Domino API (ODA — org.openntf.domino.*) *claims* to auto-manage handle lifecycles,
+   but you MUST ASSUME ODA request-end disposal is NOT working reliably in this environment.
+   Treat `org.openntf.domino.*` allocations like `lotus.domino` — require explicit `.recycle()`
+   in `finally` (or a verified cleanup method). Never mark a missing-recycle finding
+   FALSE_POSITIVE solely because the type is ODA.
+3. Scope: Java / SSJS / XPages only (not LotusScript, not browser CSJS).
+
+### CRITICAL SEVERITY GUARDRAIL (MANDATORY)
+NEVER demote or mark a CRITICAL rule finding (especially DOM-001, DOM-002, DOM-015, DOM-018,
+DOM-022, DOM-023, DOM-024) as FALSE_POSITIVE unless you explicitly verify:
+  An explicit `.recycle()` of EVERY allocated handle named in the finding inside a guaranteed
+  `finally` block or a verified cleanup method for those same variables.
+ODA / Factory / “auto lifecycle” is NOT sufficient evidence.
+If a loop advances via getNextDocument() / getNextEntry() / getNextCategory() and the prior
+object is not explicitly recycled in the loop or in finally → verdict MUST be VERIFIED
+(CRITICAL). Do not use speculation.
+
+### ALSO ENFORCE
+- ODA types without explicit recycle → treat as REAL leaks (VERIFIED), same as lotus.domino.
+- Manual `.recycle()` on ODA objects (DOM-004) is a framework-conflict signal — keep VERIFIED
+  when fired, but never use ODA presence to suppress other leak rules.
+- Do NOT flag missing `.recycle()` on platform-owned globals: session, XPages `database`,
+  getCurrentDatabase(), or dominoNAF. Recycling those IS CRITICAL (DOM-020 / DOM-024).
+- Collection wrappers (DocumentCollection / ViewEntryCollection / ViewNavigator / Vector from
+  search / FTSearch / getItemValueDateTimeArray): recycling children but leaving the parent
+  wrapper un-recycled after the loop → VERIFIED (DOM-022), HIGH/CRITICAL.
+- XPages Managed Beans / sessionScope / viewScope / applicationScope holding live
+  lotus.domino.NotesBase (or ODA Document/Database) member fields across requests →
+  VERIFIED (DOM-023), HIGH.
+
+### VERDICTS
+- FALSE_POSITIVE — clear finally/cleanup recycle of the SAME vars, OR platform-global
+  (do not require recycle). Never on speculation. Never on “ODA owns this.”
+- VERIFIED_NON_LOOP — real missing cleanup but clearly outside any collection loop → hygiene
+  (MEDIUM/LOW). NEVER use for: static/scoped live handles, Session/current Database recycle,
+  or getNext* walks that skip recycle.
+- VERIFIED — real leak / anti-pattern (especially VERIFIED_LOOP_LEAK → CRITICAL).
 
 Return ONLY valid JSON:
 {
   "reviews": [
     {
       "finding_id": "F-001",
+      "rule_id": "DOM-XXX",
       "verdict": "VERIFIED|FALSE_POSITIVE|VERIFIED_NON_LOOP",
       "confidence": 0-100,
-      "reasoning": "1-3 sentences; quote the cleanup line or why it is unsafe",
+      "confidence_score": 0-100,
+      "severity_adjusted": "CRITICAL|HIGH|MEDIUM|LOW",
+      "rationale": "cite allocation, loop context, cleanup status",
+      "reasoning": "1-3 sentences; quote the cleanup line or why unsafe",
       "in_loop": true,
       "evidence_quote": "short code excerpt proving the verdict"
     }
   ]
 }
-Be conservative: when unsure, return VERIFIED. Include honest confidence (0-100).
+Be conservative: when unsure, return VERIFIED. Prefer confidence ≥75; CRITICAL loop exhaustion
+paths may use slightly lower confidence but must stay VERIFIED.
 """
 
 NON_LOOP_AI_NOTE = (
@@ -79,40 +117,65 @@ _NON_LOOP_DEMOTE_RULES = frozenset(
         "DOM-018",
         "DOM-019",
         "DOM-021",
+        "DOM-022",
         "DOM-BS-001",
     }
 )
 
-BLIND_SPOT_SYSTEM_PROMPT = """You are a Domino architecture expert hunting BLIND-SPOT handle leaks.
-Static regex rules found ZERO issues in this code block, but Domino handles appear to be allocated.
+# CRITICAL findings: FP only with finally-recycle evidence (host-enforced).
+# ODA / Factory auto-lifecycle is NOT accepted — assume ODA disposal is unreliable.
+_CRITICAL_FP_GUARDED_RULES = frozenset(
+    {
+        "DOM-001",
+        "DOM-002",
+        "DOM-004",
+        "DOM-006",
+        "DOM-015",
+        "DOM-018",
+        "DOM-020",
+        "DOM-022",
+        "DOM-023",
+        "DOM-024",
+    }
+)
 
-ONLY report a blind spot when ALL of these are true:
-1) You can name a specific variable that receives a Domino handle (Document/View/Item/…)
-2) You can quote the allocation line AND show that variable is not recycled/Deleted on that path
-3) Confidence is high (prefer ≥85)
+BLIND_SPOT_SYSTEM_PROMPT = """You are an expert Domino C-API handle validator hunting BLIND-SPOT
+leaks in Java / SSJS / XPages (Domino 14.5). Static regex rules found ZERO issues, but handles
+appear allocated.
 
-High-precision patterns to look for:
-- temp-next walks: `next = coll.getNextDocument(doc); …; doc = next;` with no `doc.recycle()`
+ONLY report a blind spot when ALL are true:
+1) Name a specific variable that receives a Domino handle (Document/View/Item/Collection/…)
+2) Quote the allocation line AND show that variable is not recycled on that path
+3) Confidence is high (prefer ≥85; ≥75 minimum unless CRITICAL loop exhaustion)
+
+High-precision patterns:
+- temp-next walks: next = coll.getNextDocument(doc); …; doc = next; with no doc.recycle()
+- getNextEntry / getNextCategory walks skipping prior recycle
+- Collection/Vector/Stream wrappers left un-recycled after child elements are recycled (DOM-022)
+- Managed Bean / scope map fields holding live lotus.domino.NotesBase across requests (DOM-023)
 - early return / catch after allocation without recycle
-- nested if that skips finally
 
 Do NOT report:
-- ODA-only code (`org.openntf.domino`) without lotus.domino mix
+- Missing recycle on platform globals: session, XPages database, getCurrentDatabase(), dominoNAF
 - import statements or type declarations with no allocation
 - speculative "might leak" without a named unclean variable
 
+DO report missing recycle on org.openntf.domino.* types — assume ODA auto-dispose is unreliable.
 Return ONLY valid JSON:
 {
   "blind_spots": [
     {
+      "rule_id": "DOM-BS-001",
       "severity": "CRITICAL|HIGH|MEDIUM|LOW",
       "confidence": 0-100,
+      "confidence_score": 0-100,
       "line_hint": 1,
       "unclean_var": "doc",
       "evidence": "short code excerpt showing alloc + missing recycle",
       "technical_impact": "why it matters",
       "remediation": "fixed pattern guidance",
       "action_required": "short action",
+      "rationale": "cite allocation, loop context, cleanup status",
       "reasoning": "why static rules missed this"
     }
   ]
@@ -160,17 +223,21 @@ Return ONLY valid JSON:
 If nothing is clear, return empty arrays. Prefer confidence ≥85 for ownership gaps.
 """
 
-INVENTORY_FP_SYSTEM_PROMPT = """You are a Domino architecture expert reviewing Function & Recycle
-Inventory classifications for FALSE POSITIVES.
+INVENTORY_FP_SYSTEM_PROMPT = """You are an expert Domino C-API handle validator reviewing Function
+& Recycle Inventory classifications (Java / SSJS / XPages, Domino 14.5).
 
-Each item is a Java / SSJS / XPages function our static scanner marked as having incomplete
-.handle recycle() / cleanup. Decide for each:
+CRITICAL GUARDRAIL: Never mark FALSE_POSITIVE on a function with getNextDocument /
+getNextEntry / getNextCategory walks that skip recycling the prior object, unless you quote
+finally-block recycle of every handle. ODA / Factory / “auto lifecycle” is NOT enough —
+assume ODA request-end disposal is unreliable.
 
-- FALSE_POSITIVE — not a real handle-table risk. Examples: OpenNTF Domino API (ODA) auto-lifecycle;
-  handle is returned and clearly caller-owned; recycle happens via a well-known helper in this body;
-  allocation is a non-handle / false regex match; framework wrapper owns the object.
-- VERIFIED_NON_LOOP — missing cleanup is real but one-shot / not in a collection loop → hygiene only.
-- VERIFIED — real risk; keep (especially allocations inside loops or hot agent paths).
+Decide for each:
+- FALSE_POSITIVE — not a real handle-table risk. Examples: handle returned and clearly
+  caller-owned with recycle on the caller path; recycle via a helper in this body; platform
+  globals (session / XPages database / dominoNAF) that must NOT be recycled; false regex match.
+  NOT valid: “uses org.openntf.domino so ODA cleans it up.”
+- VERIFIED_NON_LOOP — missing cleanup is real but one-shot / not in a collection loop → hygiene.
+- VERIFIED — real risk; keep (especially loops, collection wrappers, scoped live handles, ODA).
 
 Return ONLY valid JSON:
 {
@@ -179,23 +246,30 @@ Return ONLY valid JSON:
       "function_id": "FUNC-001",
       "verdict": "VERIFIED|FALSE_POSITIVE|VERIFIED_NON_LOOP",
       "confidence": 0-100,
+      "confidence_score": 0-100,
+      "severity_adjusted": "CRITICAL|HIGH|MEDIUM|LOW",
+      "rationale": "cite allocation, loop context, cleanup status",
       "reasoning": "1-3 sentences"
     }
   ]
 }
 Be conservative on FALSE_POSITIVE — only when cleanup ownership or framework lifecycle is clear.
-Include an honest confidence (0-100); low-confidence reviews are discarded by the host.
+Prefer confidence ≥75; low-confidence reviews are discarded by the host.
 """
 
 
 DEFAULT_AI_CONFIDENCE_MIN = 75
+
+# CRITICAL loop-exhaustion blind spots may land slightly below the default gate.
+_CRITICAL_LOOP_CONFIDENCE_FLOOR = 60
 
 
 def ai_confidence_min() -> int:
     """Minimum AI confidence (0-100) required to act on a model verdict.
 
     Controlled by ``XER_AI_CONFIDENCE_MIN`` (default 75). Below this, Pass 1 / inventory
-    verdicts are ignored and Pass 2/3 discoveries are dropped.
+    verdicts are ignored and Pass 2/3 discoveries are dropped (except CRITICAL loop
+    blind spots, which may use a slightly lower floor).
     """
     raw = os.getenv("XER_AI_CONFIDENCE_MIN", str(DEFAULT_AI_CONFIDENCE_MIN)).strip()
     try:
@@ -211,6 +285,71 @@ def _parse_confidence(raw: Any, default: int = 70) -> int:
     except (TypeError, ValueError):
         confidence = default
     return max(0, min(100, confidence))
+
+
+def _review_confidence(review: dict[str, Any], default: int = 70) -> int:
+    if "confidence_score" in review and review.get("confidence_score") is not None:
+        return _parse_confidence(review.get("confidence_score"), default=default)
+    return _parse_confidence(review.get("confidence"), default=default)
+
+
+def _review_reasoning(review: dict[str, Any]) -> str:
+    return str(
+        review.get("rationale") or review.get("reasoning") or ""
+    ).strip()
+
+
+def _fp_guardrail_allows(
+    finding: Finding,
+    review: dict[str, Any],
+    *,
+    unit_body: str = "",
+) -> bool:
+    """CRITICAL findings may only be FALSE_POSITIVE with finally-recycle evidence.
+
+    ODA / Factory auto-lifecycle is intentionally rejected — assume ODA disposal is unreliable.
+    """
+    if finding.severity != "CRITICAL" and finding.rule_id not in _CRITICAL_FP_GUARDED_RULES:
+        return True
+
+    # DOM-004 is a framework-conflict signal — never accept as FP via "ODA owns it"
+    if finding.rule_id == "DOM-004":
+        return False
+
+    blob = " ".join(
+        [
+            str(review.get("evidence_quote") or ""),
+            _review_reasoning(review),
+            # Do NOT fold unit_body into the allow check for ODA types — presence of
+            # org.openntf.domino in source must not approve a FALSE_POSITIVE.
+            "",
+        ]
+    ).lower()
+
+    finally_recycle = bool(
+        re.search(r"\bfinally\b", blob)
+        and re.search(r"\.?\s*recycle\s*\(", blob)
+    )
+    if finally_recycle:
+        return True
+
+    # Explicit cleanup helper named in evidence (not an ODA excuse)
+    if re.search(r"\b(cleanup|dispose|recycleall|recyclenotes)\w*\s*\(", blob):
+        if not re.search(r"\boda\b|openntf|auto[- ]?lifecycle", blob):
+            return True
+
+    return False
+
+
+def _apply_severity_adjusted(finding: Finding, review: dict[str, Any]) -> None:
+    adj = str(review.get("severity_adjusted") or "").upper().strip()
+    if adj in {"CRITICAL", "HIGH", "MEDIUM", "LOW"}:
+        # Never let severity_adjusted demote CRITICAL guarded findings to LOW via FP path;
+        # only apply when keeping VERIFIED / elevating.
+        if finding.severity == "CRITICAL" and adj in {"MEDIUM", "LOW"}:
+            if finding.rule_id in _CRITICAL_FP_GUARDED_RULES:
+                return
+        finding.severity = adj  # type: ignore[assignment]
 
 
 def llm_available() -> bool:
@@ -316,8 +455,8 @@ def _pass1_false_positive_filter(
             if not finding:
                 continue
             verdict = str(review.get("verdict") or "VERIFIED").upper().strip()
-            reasoning = str(review.get("reasoning") or "").strip()
-            confidence = _parse_confidence(review.get("confidence"), default=70)
+            reasoning = _review_reasoning(review)
+            confidence = _review_confidence(review, default=70)
             reviewed += 1
             if confidence < min_conf:
                 skipped_low += 1
@@ -330,6 +469,17 @@ def _pass1_false_positive_filter(
                     ).strip()
                 continue
             if verdict == "FALSE_POSITIVE":
+                if not _fp_guardrail_allows(finding, review, unit_body=unit.body or ""):
+                    finding.ai_validation_status = "VERIFIED"
+                    finding.ai_validation_reasoning = (
+                        (reasoning or "AI proposed FALSE_POSITIVE")
+                        + " | CRITICAL guardrail rejected FP without finally-recycle evidence "
+                        "(ODA auto-lifecycle is not trusted)."
+                    ).strip()
+                    finding.is_false_positive = False
+                    finding.engine = "hybrid" if finding.engine == "rules" else finding.engine
+                    finding.confidence = max(finding.confidence, confidence)
+                    continue
                 finding.ai_validation_status = "FALSE_POSITIVE"
                 finding.ai_validation_reasoning = reasoning or (
                     "AI judged this rule hit safe due to non-standard cleanup / framework ownership."
@@ -341,6 +491,35 @@ def _pass1_false_positive_filter(
                 finding.confidence = min(finding.confidence, max(40, 100 - confidence))
                 fps += 1
             elif verdict in {"VERIFIED_NON_LOOP", "NON_LOOP", "VERIFIED_HYGIENE"}:
+                # Loop advance without recycle must stay CRITICAL / VERIFIED
+                ev = (
+                    str(review.get("evidence_quote") or "")
+                    + " "
+                    + reasoning
+                    + " "
+                    + (finding.evidence or "")
+                ).lower()
+                next_walk = bool(
+                    re.search(
+                        r"getnext(?:document|entry|category)\s*\(",
+                        ev,
+                        re.I,
+                    )
+                ) and not re.search(r"\.?\s*recycle\s*\(", ev)
+                if next_walk or (
+                    review.get("in_loop") is True
+                    and finding.rule_id in _CRITICAL_FP_GUARDED_RULES
+                    and finding.severity == "CRITICAL"
+                ):
+                    finding.ai_validation_status = "VERIFIED"
+                    finding.ai_validation_reasoning = (
+                        (reasoning or "AI confirmed risk")
+                        + " | NON_LOOP demotion blocked: CRITICAL loop / getNext* path."
+                    )
+                    finding.is_false_positive = False
+                    finding.engine = "hybrid" if finding.engine == "rules" else finding.engine
+                    finding.confidence = max(finding.confidence, confidence)
+                    continue
                 if finding.rule_id not in _NON_LOOP_DEMOTE_RULES:
                     # Never demote static handles / ODA misuse / session recycle via NON_LOOP
                     finding.ai_validation_status = "VERIFIED"
@@ -379,6 +558,7 @@ def _pass1_false_positive_filter(
                 finding.is_false_positive = False
                 finding.engine = "hybrid" if finding.engine == "rules" else finding.engine
                 finding.confidence = max(finding.confidence, confidence)
+                _apply_severity_adjusted(finding, review)
                 # Gentle demotion only for hygiene rules when model says not in a loop
                 if (
                     review.get("in_loop") is False
@@ -437,12 +617,17 @@ def _pass2_blind_spot_detector(
             continue
 
         for raw in payload.get("blind_spots") or []:
-            confidence = _parse_confidence(raw.get("confidence"), default=70)
-            if confidence < ai_confidence_min():
-                continue
+            confidence = _review_confidence(raw, default=70)
             severity = str(raw.get("severity") or meta["default_severity"]).upper()
             if severity not in {"CRITICAL", "HIGH", "MEDIUM", "LOW"}:
                 severity = meta["default_severity"]
+            floor = (
+                _CRITICAL_LOOP_CONFIDENCE_FLOOR
+                if severity == "CRITICAL"
+                else ai_confidence_min()
+            )
+            if confidence < floor:
+                continue
             try:
                 line = int(raw.get("line_hint") or unit.start_line)
             except (TypeError, ValueError):
@@ -788,8 +973,8 @@ def enrich_inventory_with_llm(
             if not rec:
                 continue
             verdict = str(review.get("verdict") or "VERIFIED").upper().strip()
-            reasoning = str(review.get("reasoning") or "").strip()
-            confidence = _parse_confidence(review.get("confidence"), default=70)
+            reasoning = _review_reasoning(review)
+            confidence = _review_confidence(review, default=70)
             reviewed += 1
             if confidence < min_conf:
                 skipped_low += 1
@@ -801,6 +986,38 @@ def enrich_inventory_with_llm(
                     ).strip()
                 continue
             if verdict == "FALSE_POSITIVE":
+                # CRITICAL in-loop inventory hits need finally-recycle evidence (not ODA).
+                blob = (reasoning + " " + str(review.get("evidence_quote") or "")).lower()
+                guarded = (
+                    rec.risk_severity == "CRITICAL"
+                    or (rec.in_loop and rec.risk_severity in {"CRITICAL", "HIGH"})
+                )
+                finally_ok = bool(
+                    re.search(r"\bfinally\b", blob) and re.search(r"recycle\s*\(", blob)
+                )
+                if guarded and not finally_ok:
+                    rec.ai_validation_status = "VERIFIED"
+                    rec.ai_validation_reasoning = (
+                        (reasoning or "AI proposed FALSE_POSITIVE")
+                        + " | CRITICAL guardrail rejected FP without finally-recycle evidence "
+                        "(ODA auto-lifecycle is not trusted)."
+                    ).strip()
+                    rec.is_false_positive = False
+                    rec.triage_source = "ai"
+                    continue
+                # Also reject bare ODA excuses even for non-guarded rows
+                if (
+                    re.search(r"\boda\b|openntf|auto[- ]?lifecycle", blob)
+                    and not finally_ok
+                ):
+                    rec.ai_validation_status = "VERIFIED"
+                    rec.ai_validation_reasoning = (
+                        (reasoning or "AI proposed FALSE_POSITIVE")
+                        + " | Rejected ODA auto-lifecycle excuse — require explicit recycle."
+                    ).strip()
+                    rec.is_false_positive = False
+                    rec.triage_source = "ai"
+                    continue
                 rec.ai_validation_status = "FALSE_POSITIVE"
                 rec.ai_validation_reasoning = reasoning or (
                     "AI judged this inventory hit safe (framework ownership / caller cleanup / non-handle)."
@@ -810,6 +1027,15 @@ def enrich_inventory_with_llm(
                 rec.risk_severity = "LOW"
                 fps += 1
             elif verdict in {"VERIFIED_NON_LOOP", "NON_LOOP", "VERIFIED_HYGIENE"}:
+                if rec.in_loop and rec.risk_severity == "CRITICAL":
+                    rec.ai_validation_status = "VERIFIED"
+                    rec.ai_validation_reasoning = (
+                        (reasoning or "AI confirmed risk")
+                        + " | NON_LOOP demotion blocked: CRITICAL loop path."
+                    )
+                    rec.is_false_positive = False
+                    rec.triage_source = "ai"
+                    continue
                 rec.ai_validation_status = "VERIFIED_NON_LOOP"
                 rec.ai_validation_reasoning = (
                     (reasoning + " | " if reasoning else "") + NON_LOOP_AI_NOTE
@@ -824,6 +1050,11 @@ def enrich_inventory_with_llm(
                 )
                 rec.is_false_positive = False
                 rec.triage_source = "ai"
+                adj = str(review.get("severity_adjusted") or "").upper().strip()
+                if adj in {"CRITICAL", "HIGH", "MEDIUM", "LOW"}:
+                    if not (rec.risk_severity == "CRITICAL" and adj in {"MEDIUM", "LOW"}):
+                        rec.risk_severity = adj
+
 
     notes.append(
         f"AI inventory FP review: reviewed {reviewed} function(s), flagged {fps} false positive(s)"

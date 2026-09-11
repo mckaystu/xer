@@ -553,14 +553,8 @@ def build_inventory(units: Iterable[CodeUnit]) -> list[FunctionRecord]:
             seq += 1
             analysis = analyze_handle_cleanup(fn_body, unit.language)
             status = analysis.status  # type: ignore[assignment]
-            # ODA auto-lifecycle: no lotus.domino mix and no manual recycle → not HE risk
-            if (
-                status in {"UNPROTECTED_ALLOCATION", "PARTIAL_CLEANUP", "CONDITIONAL_CLEANUP"}
-                and re.search(r"org\.openntf\.domino", fn_body or "", re.I)
-                and not re.search(r"lotus\.domino", fn_body or "", re.I)
-                and analysis.recycle_call_count == 0
-            ):
-                status = "PROTECTED"  # type: ignore[assignment]
+            # Do NOT treat ODA (org.openntf.domino) as auto-protected — assume ODA
+            # request-end disposal is unreliable; missing recycle stays actionable.
             lang_label = _language_label(unit.language)
             looped = body_has_loop(fn_body)
             risk = inventory_risk_severity(
@@ -704,7 +698,8 @@ def run_function_inventory(
     the same C-API recycle / handle-table exhaustion model.
 
     When ``use_llm=True`` and OPENAI_API_KEY is set, actionable rows are reviewed
-    for false positives (ODA, caller-owned handles, etc.).
+    for false positives (caller-owned handles, mis-hits, etc.).
+    ODA auto-lifecycle is not trusted and must not clear inventory risk alone.
     """
     if graph is not None:
         units = extract_units_from_graph(graph)

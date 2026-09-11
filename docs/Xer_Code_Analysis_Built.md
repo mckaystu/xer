@@ -75,8 +75,11 @@ DXL / ODP / application graph
 | DOM-019 | Un-recycled `getAllDocumentsByKey` / multi-doc collections |
 | DOM-020 | Dangerous recycle of Session / current Database |
 | DOM-021 | Un-recycled Stream / NotesStream |
+| DOM-022 | Collection / Vector wrapper left un-recycled after child cleanup |
+| DOM-023 | XPages Managed Bean / scope map holds live NotesBase |
+| DOM-024 | Recycle of platform globals (session / current DB / dominoNAF) |
 
-**Risk hierarchy (worse → milder):** Document/entry walks & navigators → multi-doc collections & attachments/MIME in loops → static/scoped live handles → one-shot hygiene. Never recycle Session or the XPages current `database`.
+**Risk hierarchy (worse → milder):** Document/entry walks & navigators → multi-doc collections & attachments/MIME in loops → static/scoped live handles → one-shot hygiene. Never recycle Session, XPages current `database`, or `dominoNAF`. **Do not trust ODA auto-dispose** — treat `org.openntf.domino.*` like `lotus.domino` and require explicit `.recycle()` in `finally`.
 
 ### LotusScript — out of scope
 

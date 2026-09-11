@@ -25,9 +25,9 @@ RULE_CATALOG: dict[str, dict[str, str]] = {
         "default_severity": "HIGH",
     },
     "DOM-004": {
-        "title": "Manual recycle() on OpenNTF Domino API Objects",
+        "title": "ODA Dual-Lifecycle Conflict (manual recycle vs unreliable auto-dispose)",
         "category": "Framework Conflicts",
-        "default_severity": "CRITICAL",
+        "default_severity": "HIGH",
     },
     "DOM-005": {
         "title": "Mixed lotus.domino / ODA Object Passing",
@@ -148,6 +148,21 @@ RULE_CATALOG: dict[str, dict[str, str]] = {
         "title": "Un-Recycled Stream Handle",
         "category": "C-API Handle Leaks & Object Recycling",
         "default_severity": "MEDIUM",
+    },
+    "DOM-022": {
+        "title": "Collection Wrapper / Vector Left Un-Recycled After Child Cleanup",
+        "category": "C-API Handle Leaks & Object Recycling",
+        "default_severity": "HIGH",
+    },
+    "DOM-023": {
+        "title": "XPages Managed Bean / Scope Map Holds Live NotesBase",
+        "category": "Static Variables & Lifetime Anti-Patterns",
+        "default_severity": "HIGH",
+    },
+    "DOM-024": {
+        "title": "Recycle of Platform-Owned Global (session / current DB / dominoNAF)",
+        "category": "C-API Handle Leaks & Object Recycling",
+        "default_severity": "CRITICAL",
     },
     "LS-DOM-008": {
         "title": "In-Loop Search Collection Leaks",

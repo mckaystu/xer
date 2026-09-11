@@ -78,7 +78,10 @@ class TestPass1FalsePositiveFilter:
                             "finding_id": fid,
                             "verdict": "FALSE_POSITIVE",
                             "confidence": 88,
-                            "reasoning": "Custom helper deletes before return.",
+                            "confidence_score": 88,
+                            "rationale": "finally { doc.recycle(); } cleans every iteration",
+                            "reasoning": "finally { doc.recycle(); } cleans every iteration",
+                            "evidence_quote": "finally { if (doc != null) doc.recycle(); }",
                         }
                     ]
                 }
@@ -90,6 +93,35 @@ class TestPass1FalsePositiveFilter:
         assert fps, f"expected FP; notes={notes}"
         assert fps[0].ai_validation_status == "FALSE_POSITIVE"
         assert any("Pass 1" in n for n in notes)
+
+    def test_critical_guardrail_blocks_bare_fp(
+        self, monkeypatch: pytest.MonkeyPatch, java_cases_by_id: dict[str, FixtureCase]
+    ):
+        monkeypatch.setenv("OPENAI_API_KEY", "sk-test-not-real")
+        unit = case_to_unit(java_cases_by_id["dom002_loop_no_recycle"])
+        findings = run_rule_engine([unit])
+
+        def fake_chat(system: str, user_payload: dict, *, model: str) -> dict:
+            if "FALSE-POSITIVE" in system or "FALSE_POSITIVE" in system:
+                fid = user_payload["findings"][0]["finding_id"]
+                return {
+                    "reviews": [
+                        {
+                            "finding_id": fid,
+                            "verdict": "FALSE_POSITIVE",
+                            "confidence": 90,
+                            "reasoning": "probably fine",
+                            "evidence_quote": "",
+                        }
+                    ]
+                }
+            return {"blind_spots": [], "ownership_gaps": [], "severity_adjustments": []}
+
+        with patch("analytics.code_auditor.llm_engine._chat_json", side_effect=fake_chat):
+            out, _notes = enrich_with_llm([unit], findings, max_units=6)
+        assert not any(f.is_false_positive for f in out)
+        guarded = [f for f in out if "CRITICAL guardrail" in (f.ai_validation_reasoning or "")]
+        assert guarded
 
     def test_verifies_real_leak(self, monkeypatch: pytest.MonkeyPatch, java_cases_by_id: dict[str, FixtureCase]):
         monkeypatch.setenv("OPENAI_API_KEY", "sk-test-not-real")
