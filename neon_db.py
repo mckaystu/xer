@@ -162,6 +162,39 @@ def store_graph(
         conn.close()
 
 
+def _basename_dxl(value: str | None) -> str | None:
+    """Return a display filename for a stored DXL source path / upload label."""
+    if not value:
+        return None
+    text = str(value).strip()
+    if not text:
+        return None
+    # upload:Code_FrombossRest.dxl → Code_FrombossRest.dxl
+    if text.lower().startswith("upload:"):
+        text = text.split(":", 1)[1]
+    text = text.replace("\\", "/").rstrip("/")
+    name = text.split("/")[-1] if "/" in text else text
+    return name or None
+
+
+def extract_source_dxl(graph: dict[str, Any] | None) -> str | None:
+    """Best-effort DXL filename from application graph meta."""
+    if not isinstance(graph, dict):
+        return None
+    meta = graph.get("meta") or {}
+    sources = meta.get("source_files") or []
+    if sources and isinstance(sources[0], dict):
+        hit = _basename_dxl(sources[0].get("path"))
+        if hit:
+            return hit
+    databases = meta.get("databases") or []
+    if databases and isinstance(databases[0], dict):
+        hit = _basename_dxl(databases[0].get("source_file"))
+        if hit:
+            return hit
+    return _basename_dxl(meta.get("input_directory"))
+
+
 def load_graph_from_file(path: Path | str) -> dict[str, Any]:
     p = Path(path)
     return json.loads(p.read_text(encoding="utf-8"))
@@ -175,7 +208,12 @@ def list_graphs(limit: int = 50) -> list[dict[str, Any]]:
             cur.execute(
                 """
                 SELECT id, nsf_path, database_title, parser_version, parsed_at, totals,
-                       audit_snapshot, audit_snapshot_at
+                       audit_snapshot, audit_snapshot_at,
+                       COALESCE(
+                         graph->'meta'->'source_files'->0->>'path',
+                         graph->'meta'->'databases'->0->>'source_file',
+                         graph->'meta'->>'input_directory'
+                       ) AS source_dxl
                 FROM dxl_graphs
                 ORDER BY parsed_at DESC
                 LIMIT %s
@@ -186,11 +224,13 @@ def list_graphs(limit: int = 50) -> list[dict[str, Any]]:
         out: list[dict[str, Any]] = []
         for row in rows:
             snap = row.get("audit_snapshot")
+            source_dxl = _basename_dxl(row.get("source_dxl"))
             out.append(
                 {
                     "id": str(row["id"]),
                     "nsf_path": row["nsf_path"],
                     "database_title": row["database_title"],
+                    "source_dxl": source_dxl,
                     "parser_version": row["parser_version"],
                     "parsed_at": row["parsed_at"].isoformat() if row["parsed_at"] else None,
                     "totals": row["totals"],
@@ -233,6 +273,7 @@ def get_graph(graph_id: str) -> dict[str, Any] | None:
             "id": str(row["id"]),
             "nsf_path": row["nsf_path"],
             "database_title": row["database_title"],
+            "source_dxl": extract_source_dxl(row.get("graph") if isinstance(row.get("graph"), dict) else None),
             "parser_version": row["parser_version"],
             "parsed_at": row["parsed_at"].isoformat() if row["parsed_at"] else None,
             "totals": row["totals"],

@@ -92,7 +92,7 @@ def api_get_graph(graph_id: str) -> dict[str, Any]:
 
 @app.get("/api/graphs/{graph_id}/viz")
 def api_graph_viz(graph_id: str) -> dict[str, Any]:
-    from neon_db import build_viz_payload, get_graph
+    from neon_db import build_viz_payload, extract_source_dxl, get_graph
 
     try:
         row = get_graph(graph_id)
@@ -104,6 +104,9 @@ def api_graph_viz(graph_id: str) -> dict[str, Any]:
     payload["graphId"] = graph_id
     payload["database_title"] = row.get("database_title")
     payload["nsf_path"] = row.get("nsf_path")
+    payload["source_dxl"] = row.get("source_dxl") or extract_source_dxl(
+        row.get("graph") if isinstance(row.get("graph"), dict) else None
+    )
     return payload
 
 

@@ -45,6 +45,51 @@ body {
   font-size: 0.85rem;
 }
 
+.dxl-source-line {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 0.35rem 0.55rem;
+  margin: 6px 0 0;
+  font-size: 0.84rem;
+  color: var(--text);
+}
+
+.dxl-source-line[hidden] {
+  display: none;
+}
+
+.dxl-source-label {
+  font-size: 0.68rem;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--muted);
+}
+
+.dxl-source-line code,
+.dxl-file-pill {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 0.84rem;
+  color: #d7e7f7;
+  background: rgba(91, 159, 212, 0.14);
+  border: 1px solid rgba(91, 159, 212, 0.35);
+  border-radius: 6px;
+  padding: 0.12rem 0.45rem;
+}
+
+.dxl-file-pill {
+  display: inline-block;
+  margin-left: 0.35rem;
+  vertical-align: middle;
+}
+
+.overview-header .dxl-context {
+  margin: 0.35rem 0 0;
+  color: var(--muted);
+  font-size: 0.86rem;
+}
+
 .controls {
   display: flex;
   gap: 12px;

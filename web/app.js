@@ -113,6 +113,78 @@ let activeView = "code";
 let focusNodeId = null;
 let focusTargetId = null;
 
+const appSubtitle = document.getElementById("appSubtitle");
+const dxlSourceLine = document.getElementById("dxlSourceLine");
+const dxlSourceName = document.getElementById("dxlSourceName");
+
+/** Basename helper for DXL paths / upload:name.dxl labels. */
+function basenameDxl(value) {
+  if (!value) return "";
+  let text = String(value).trim();
+  if (!text) return "";
+  if (text.toLowerCase().startsWith("upload:")) text = text.slice(7);
+  text = text.replace(/\\/g, "/").replace(/\/+$/, "");
+  const parts = text.split("/");
+  return parts[parts.length - 1] || text;
+}
+
+/** Current DXL filename for the selected graph (updates when graph switches). */
+function currentDxlFileName() {
+  const fromViz = currentViz?.source_dxl;
+  if (fromViz) return basenameDxl(fromViz);
+  const fromApi = fullGraph?.source_dxl;
+  if (fromApi) return basenameDxl(fromApi);
+  const graph = fullGraph?.graph || fullGraph;
+  const meta = graph?.meta || {};
+  const sf = meta.source_files?.[0];
+  if (sf?.path) return basenameDxl(sf.path);
+  const db = meta.databases?.[0];
+  if (db?.source_file) return basenameDxl(db.source_file);
+  if (meta.input_directory) return basenameDxl(meta.input_directory);
+  return "";
+}
+
+function currentDatabaseTitle() {
+  return (
+    currentViz?.database_title ||
+    fullGraph?.database_title ||
+    fullGraph?.graph?.meta?.source_files?.[0]?.database_title ||
+    ""
+  );
+}
+
+function updateDxlHeader() {
+  const dxl = currentDxlFileName();
+  const title = currentDatabaseTitle();
+  if (dxlSourceName) dxlSourceName.textContent = dxl || "—";
+  if (dxlSourceLine) dxlSourceLine.hidden = !dxl;
+  if (appSubtitle) {
+    if (dxl && title) {
+      appSubtitle.textContent = `${title} · analyzing ${dxl}`;
+    } else if (dxl) {
+      appSubtitle.textContent = `Analyzing ${dxl}`;
+    } else {
+      appSubtitle.textContent = "Domino design relationships — focus, matrix, or full graph";
+    }
+  }
+  if (dxl) {
+    document.title = `Xer — ${dxl}`;
+  } else {
+    document.title = "Xer — DXL Graph Explorer";
+  }
+}
+
+function renderCodeAnalysisSourceLine() {
+  const dxl = currentDxlFileName();
+  const title = currentDatabaseTitle();
+  if (!dxl && !title) return "";
+  return `<p class="dxl-context" role="status">
+      Source DXL: ${
+        dxl ? `<span class="dxl-file-pill" title="Active DXL export">${escapeHtml(dxl)}</span>` : "—"
+      }${title ? ` · <span>${escapeHtml(title)}</span>` : ""}
+    </p>`;
+}
+
 const SEVERITY_RANK = { CRITICAL: 4, HIGH: 3, MEDIUM: 2, LOW: 1 };
 // Canvas-safe markers (vis-network's canvas renderer often drops emoji)
 const SEVERITY_MARK = { CRITICAL: "●", HIGH: "●", MEDIUM: "◐", LOW: "○" };
@@ -1843,13 +1915,18 @@ function renderCodeAnalysisCacheBar() {
 function renderCodeAnalysis() {
   if (!codeAnalysisContent) return;
   if (!currentCodeAudit && !currentFunctionInventory) {
-    codeAnalysisContent.innerHTML = `<div class="overview-header"><h2>Code Analysis</h2><p class="overview-sub">Static review of Domino handle leaks, recycle coverage, and remediation templates.</p></div><p class="placeholder">Loading code quality audit…</p>`;
+    codeAnalysisContent.innerHTML = `<div class="overview-header"><h2>Code Analysis</h2>${renderCodeAnalysisSourceLine()}<p class="overview-sub">Static review of Domino handle leaks, recycle coverage, and remediation templates.</p></div><p class="placeholder">Loading code quality audit…</p>`;
     if (graphSelect.value) loadSummary(graphSelect.value);
     return;
   }
   codeAnalysisContent.innerHTML = `
     <div class="overview-header">
-      <h2>Code Analysis</h2>
+      <h2>Code Analysis ${
+        currentDxlFileName()
+          ? `<span class="dxl-file-pill" title="Active DXL export">${escapeHtml(currentDxlFileName())}</span>`
+          : ""
+      }</h2>
+      ${renderCodeAnalysisSourceLine()}
       <p class="overview-sub">Work list is the <strong>Function &amp; Recycle Inventory</strong> (Needs work). Open a row for As-Is / To-Be and related rule findings. Full findings stay collapsed below.</p>
       ${renderCodeAnalysisCacheBar()}
     </div>
@@ -2613,8 +2690,12 @@ async function loadGraphList() {
     const opt = document.createElement("option");
     opt.value = g.id;
     const title = g.database_title || g.nsf_path;
+    const dxl = basenameDxl(g.source_dxl || "");
     const totals = g.totals || {};
-    opt.textContent = `${title} (${totals.edges || 0} edges) — ${g.parsed_at?.slice(0, 16) || ""}`;
+    opt.dataset.sourceDxl = dxl || "";
+    opt.textContent = dxl
+      ? `${dxl} — ${title} (${totals.edges || 0} edges)`
+      : `${title} (${totals.edges || 0} edges) — ${g.parsed_at?.slice(0, 16) || ""}`;
     graphSelect.appendChild(opt);
   });
 }
@@ -2638,10 +2719,13 @@ async function loadSelectedGraph() {
   inventoryListFilter = "actionable";
   inventoryLangFilter = "all";
   inventorySearch = "";
+  updateDxlHeader();
   syncEdgeFilterForGraph();
   populateFocusSelect();
   // Await audit/inventory BEFORE first graph paint so badges are present immediately
   await loadSummary(id).catch(() => {});
+  updateDxlHeader();
+  if (activeView === "code") renderCodeAnalysis();
   if (activeView === "overview" || activeView === "rules" || activeView === "code") {
     /* already rendered inside loadSummary when applicable */
   } else if (activeView === "matrix") {
@@ -2650,9 +2734,11 @@ async function loadSelectedGraph() {
     buildNetwork();
   }
   const edgeTypes = [...new Set((viz.edges || []).map((e) => e.type))];
+  const dxl = currentDxlFileName();
   detailPanel.innerHTML = `
     <h2>${viz.database_title || "Application"}</h2>
     <div class="meta-grid">
+      <div><span>DXL</span> ${dxl || "—"}</div>
       <div><span>NSF</span> ${viz.nsf_path || "—"}</div>
       <div><span>Nodes</span> ${viz.nodes.length}</div>
       <div><span>Edges</span> ${viz.edges.length}</div>
