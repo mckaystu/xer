@@ -1005,6 +1005,248 @@ def remediation_template(
     return templates_java.get(rule_id) or templates_java["DOM-002"]
 
 
+_RE_NEXT_DOC = re.compile(
+    r"(?i)\b([A-Za-z_]\w*)\s*=\s*([A-Za-z_]\w*)\s*\.\s*(?:get|Get)NextDocument\s*\(\s*([A-Za-z_]\w*)\s*\)"
+)
+_RE_FIRST_DOC = re.compile(
+    r"(?i)\b([A-Za-z_]\w*)\s*=\s*([A-Za-z_]\w*)\s*\.\s*(?:get|Get)FirstDocument\s*\("
+)
+_RE_LS_NEXT_DOC = re.compile(
+    r"(?i)\bSet\s+([A-Za-z_]\w*)\s*=\s*([A-Za-z_]\w*)\s*\.\s*GetNextDocument\s*\(\s*([A-Za-z_]\w*)\s*\)"
+)
+_RE_LS_FIRST_DOC = re.compile(
+    r"(?i)\bSet\s+([A-Za-z_]\w*)\s*=\s*([A-Za-z_]\w*)\s*\.\s*GetFirstDocument\s*\("
+)
+def _unique_vars(*groups: list[str] | None, limit: int = 8) -> list[str]:
+    seen: set[str] = set()
+    out: list[str] = []
+    for group in groups:
+        for name in group or []:
+            key = (name or "").strip()
+            if not key or key in seen:
+                continue
+            # Skip obvious non-handles
+            if key.lower() in {"i", "j", "n", "x", "y", "tmp", "temp", "s", "str", "msg"}:
+                continue
+            seen.add(key)
+            out.append(key)
+            if len(out) >= limit:
+                return out
+    return out
+
+
+def _detect_doc_walk(body: str, *, lotusscript: bool) -> tuple[str, str, str] | None:
+    """Return (doc_var, collection_var, next_var) when a GetNextDocument walk is present."""
+    text = body or ""
+    if lotusscript:
+        nxt = _RE_LS_NEXT_DOC.search(text)
+        first = _RE_LS_FIRST_DOC.search(text)
+    else:
+        nxt = _RE_NEXT_DOC.search(text)
+        first = _RE_FIRST_DOC.search(text)
+    if nxt:
+        next_var, coll, doc_var = nxt.group(1), nxt.group(2), nxt.group(3)
+        return doc_var, coll, next_var
+    if first:
+        doc_var, coll = first.group(1), first.group(2)
+        next_var = "nextDoc" if doc_var.lower() == "doc" else f"next{doc_var[:1].upper()}{doc_var[1:]}"
+        return doc_var, coll, next_var
+    return None
+
+
+def _format_var_list(names: list[str]) -> str:
+    if not names:
+        return "allocated Domino handles"
+    if len(names) == 1:
+        return f"`{names[0]}`"
+    if len(names) == 2:
+        return f"`{names[0]}` and `{names[1]}`"
+    return ", ".join(f"`{n}`" for n in names[:-1]) + f", and `{names[-1]}`"
+
+
+def _java_like_recycle_block(vars_: list[str], *, indent: str = "  ") -> list[str]:
+    lines: list[str] = []
+    # Children before parents when names suggest nesting — reverse declaration order as heuristic
+    for name in reversed(vars_):
+        lines.append(f"{indent}if ({name} != null) {{ try {{ {name}.recycle(); }} catch (e) {{}} }}")
+    return lines
+
+
+def _ls_delete_block(vars_: list[str], *, indent: str = "    ") -> list[str]:
+    lines: list[str] = []
+    for name in reversed(vars_):
+        lines.append(f"{indent}If Not {name} Is Nothing Then Delete {name}")
+    return lines
+
+
+def contextual_remediation(
+    *,
+    language: str | None,
+    function_name: str = "",
+    body: str = "",
+    allocated_vars: list[str] | None = None,
+    unclean_vars: list[str] | None = None,
+    has_loop: bool | None = None,
+    rule_id: str | None = None,
+) -> str:
+    """Build a To-Be sketch using this function's handle names / loop shape.
+
+    Not a full rewrite — keeps business logic as a placeholder and shows where
+    recycle/Delete should land. Falls back to the canned rule template when
+    context is too thin to be useful.
+    """
+    from analytics.code_auditor.context import body_has_loop
+
+    lang = normalize_language(language)
+    ls = lang == "lotusscript"
+    ssjs = lang in {"ssjs", "javascript", "xpages"}
+    looped = body_has_loop(body) if has_loop is None else bool(has_loop)
+    vars_ = _unique_vars(unclean_vars, allocated_vars)
+    fname = (function_name or "").strip() or "thisRoutine"
+    label = language_label(language)
+    rid = rule_id or ("LS-DOM-001" if ls and looped else "DOM-002" if looped else "DOM-010")
+
+    # Too little signal → canned template
+    if not vars_ and not _detect_doc_walk(body, lotusscript=ls):
+        return remediation_template(rid, language, has_loop=looped)
+
+    header_java = (
+        f"// Contextual sketch for {fname} ({label}) — adapt; not a full rewrite\n"
+        f"// Release on every exit path: {', '.join(vars_) if vars_ else 'Domino handles'}\n"
+    )
+    header_ls = (
+        f"' Contextual sketch for {fname} ({label}) — adapt; not a full rewrite\n"
+        f"' Release on every exit path: {', '.join(vars_) if vars_ else 'Notes* handles'}\n"
+    )
+
+    walk = _detect_doc_walk(body, lotusscript=ls)
+    if walk and looped:
+        doc_var, coll, next_var = walk
+        if ls:
+            lines = [
+                header_ls.rstrip(),
+                f"Set {doc_var} = {coll}.GetFirstDocument()",
+                f"Do While Not ({doc_var} Is Nothing)",
+                f"    Set {next_var} = {coll}.GetNextDocument({doc_var})",
+                f"    ' Keep existing per-document work from {fname}",
+                f"    If Not {doc_var} Is Nothing Then Delete {doc_var}",
+                f"    Set {doc_var} = {next_var}",
+                "Loop",
+            ]
+            extras = [v for v in vars_ if v not in {doc_var, next_var, coll}]
+            if extras:
+                lines.append("' Also release other locals allocated in this routine:")
+                lines.extend(_ls_delete_block(extras, indent=""))
+            return "\n".join(lines)
+
+        decl = "var " if ssjs else ""
+        nullish = "null"
+        lines = [
+            header_java.rstrip(),
+            f"{decl}{doc_var} = {coll}.getFirstDocument();",
+            f"while ({doc_var} != {nullish}) {{",
+            f"  {decl}{next_var} = {coll}.getNextDocument({doc_var});",
+            "  try {",
+            f"    // Keep existing per-document work from {fname}",
+            "  } finally {",
+            f"    if ({doc_var} != null) {{ try {{ {doc_var}.recycle(); }} catch (e) {{}} }}",
+            "  }",
+            f"  {doc_var} = {next_var};",
+            "}",
+        ]
+        extras = [v for v in vars_ if v not in {doc_var, next_var, coll}]
+        if extras:
+            lines.append("// Also release other locals allocated in this routine:")
+            lines.extend(_java_like_recycle_block(extras, indent=""))
+        return "\n".join(lines)
+
+    # Generic try/finally (or LS Delete) using this function's real handle names
+    if ls:
+        lines = [
+            header_ls.rstrip(),
+            f"' Keep existing work from {fname}, then release before Exit / Loop advance",
+        ]
+        if vars_:
+            lines.extend(_ls_delete_block(vars_, indent=""))
+        else:
+            lines.append("If Not doc Is Nothing Then Delete doc")
+        if looped:
+            lines.append("' Inside loops: Delete the current handle before advancing to the next")
+        return "\n".join(lines)
+
+    # Prefer unclean vars for recycle list; fall back to allocated
+    recycle_vars = vars_ or ["doc"]
+    decl_lines: list[str] = []
+    if ssjs:
+        for v in recycle_vars:
+            decl_lines.append(f"// {v} — already declared in {fname}; ensure it is null-initialized")
+    else:
+        for v in recycle_vars:
+            decl_lines.append(f"// Ensure {v} is assigned null before try if not already")
+
+    work_hint = (
+        f"  // Keep existing logic from {fname} (see As-Is)\n"
+        if not looped
+        else (
+            f"  // Keep existing loop body from {fname} (see As-Is)\n"
+            "  // Capture next handle first if walking documents/collections\n"
+        )
+    )
+    lines = [header_java.rstrip()]
+    lines.extend(decl_lines)
+    lines.append("try {")
+    lines.append(work_hint.rstrip())
+    lines.append("} finally {")
+    lines.extend(_java_like_recycle_block(recycle_vars))
+    lines.append("}")
+    return "\n".join(lines)
+
+
+def contextual_remediation_guide(
+    *,
+    language: str | None,
+    function_name: str = "",
+    allocated_vars: list[str] | None = None,
+    unclean_vars: list[str] | None = None,
+    has_loop: bool = False,
+    rule_id: str | None = None,
+    fallback: str = "",
+) -> str:
+    """Short fix guidance that names this function and its handle variables."""
+    lang = normalize_language(language)
+    ls = lang == "lotusscript"
+    vars_ = _unique_vars(unclean_vars, allocated_vars, limit=6)
+    fname = (function_name or "").strip()
+    var_text = _format_var_list(vars_)
+    cleanup = "`Delete`" if ls else "`.recycle()`"
+    finally_bit = (
+        "before Exit / Loop advance"
+        if ls
+        else "in a `finally` (or equivalent) before the loop advances / the method returns"
+    )
+
+    if fname and vars_:
+        if has_loop:
+            return (
+                f"In `{fname}`, release {var_text} with {cleanup} {finally_bit}. "
+                "If this is a document walk, capture the next handle first, then release the current one."
+            )
+        return (
+            f"In `{fname}`, wrap use of {var_text} so every exit path calls {cleanup} "
+            f"{finally_bit}."
+        )
+    if fname:
+        if has_loop:
+            return (
+                f"In `{fname}`, release each Domino handle with {cleanup} before advancing the loop "
+                f"({finally_bit})."
+            )
+        return f"In `{fname}`, ensure every allocated Domino handle is released with {cleanup} on all paths."
+    if fallback:
+        return fallback
+    return remediation_guide(rule_id or "DOM-010", language)
+
+
 # Back-compat alias used by older imports
 def default_try_finally_remediation(language: str = "java") -> str:
     return remediation_template("DOM-010", language)
@@ -1125,7 +1367,9 @@ def attach_snippet_fields(
     handle_lifecycle_warning: str,
     rule_id: str | None = None,
     has_loop: bool | None = None,
+    function_name: str | None = None,
 ) -> dict[str, Any]:
+    from analytics.code_auditor.api_catalog import analyze_handle_cleanup
     from analytics.code_auditor.context import body_has_loop
 
     snippet, line_start, line_end, _hl, structured = extract_line_window(
@@ -1139,21 +1383,40 @@ def attach_snippet_fields(
     )
     as_is = snippet if snippet.strip() else evidence
     looped = body_has_loop(unit.body) if has_loop is None else bool(has_loop)
+    analysis = analyze_handle_cleanup(unit.body, unit.language)
+    fname = (function_name or unit.element_name or "").strip()
 
-    # Always prefer language-aware template when we know the rule
-    if rule_id:
-        to_be = remediation_template(rule_id, unit.language, has_loop=looped)
-    else:
-        # If caller passed a Java template but unit is LotusScript, replace it
+    rid = rule_id or "DOM-010"
+    # Prefer contextual sketch from this unit's handles; fall back to canned rule template
+    to_be = contextual_remediation(
+        language=unit.language,
+        function_name=fname,
+        body=unit.body,
+        allocated_vars=analysis.allocated_vars,
+        unclean_vars=analysis.unclean_vars,
+        has_loop=looped,
+        rule_id=rid,
+    )
+    if not to_be.strip():
         rem = (remediation or "").strip()
-        if normalize_language(unit.language) == "lotusscript" and (
+        if rule_id:
+            to_be = remediation_template(rule_id, unit.language, has_loop=looped)
+        elif normalize_language(unit.language) == "lotusscript" and (
             "try {" in rem or ".recycle()" in rem or rem.startswith("//")
         ):
             to_be = remediation_template("DOM-002", unit.language, has_loop=looped)
         else:
             to_be = rem or remediation_template("DOM-010", unit.language, has_loop=looped)
 
-    rid = rule_id or "DOM-010"
+    guide = contextual_remediation_guide(
+        language=unit.language,
+        function_name=fname,
+        allocated_vars=analysis.allocated_vars,
+        unclean_vars=analysis.unclean_vars,
+        has_loop=looped,
+        rule_id=rid,
+        fallback=remediation_guide(rid, unit.language),
+    )
     return {
         "code_snippet_as_is": as_is,
         "code_snippet_to_be": to_be,
@@ -1163,6 +1426,6 @@ def attach_snippet_fields(
         "highlight_line": focus_line,
         "handle_lifecycle_warning": handle_lifecycle_warning,
         "problem_breakdown": problem_breakdown(rid, unit.language),
-        "remediation_guide": remediation_guide(rid, unit.language),
+        "remediation_guide": guide,
         "language_label": language_label(unit.language),
     }

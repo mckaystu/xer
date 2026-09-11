@@ -274,6 +274,13 @@ def find_allocated_vars(body: str, language: str = "") -> list[str]:
             text,
         ):
             names.add(m.group(1))
+        # SSJS typed locals: var attachItem:NotesRichTextItem
+        for m in re.finditer(
+            rf"(?i)\b(?:var|let|const)\s+([A-Za-z_]\w*)\s*:\s*"
+            rf"(?:{_LS_TYPE_ALT}|{_JAVA_TYPE_ALT})\b",
+            text,
+        ):
+            names.add(m.group(1))
     return sorted(names)
 
 
