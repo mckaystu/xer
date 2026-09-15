@@ -181,8 +181,8 @@ function bad() {
     assert findings == []
 
 
-def test_oda_inventory_still_unprotected():
-    """ODA auto-dispose is not trusted — missing recycle stays actionable."""
+def test_oda_inventory_not_unprotected():
+    """Pure ODA without manual recycle is inventory-PROTECTED (auto-lifecycle)."""
     body = """
 public class OdaHelper {
   public void load(org.openntf.domino.Database db) {
@@ -193,4 +193,4 @@ public class OdaHelper {
 """
     recs = build_inventory([_unit(body)])
     assert recs, "expected inventory rows for OdaHelper.load"
-    assert recs[0].status == "UNPROTECTED_ALLOCATION"
+    assert recs[0].status == "PROTECTED"

@@ -24,10 +24,9 @@ PROBLEM_BREAKDOWNS: dict[str, str] = {
         "occurs mid-method, handles remain pinned on the thread."
     ),
     "DOM-004": (
-        "Code uses OpenNTF Domino API (ODA) and also calls `.recycle()`. ODA *claims* "
-        "request-end disposal, but this environment assumes ODA may not run — dual lifecycle "
-        "risk (leak if ODA fails; double-free if ODA later disposes). Prefer explicit "
-        "lotus.domino + finally recycle, and do not treat ODA as proof of cleanup."
+        "Calling `.recycle()` on org.openntf.domino.* wrappers is a CRITICAL deadlock bug "
+        "(SessionModerator / WrapperFactory.recycle / Factory.termThread). ODA auto-manages "
+        "native handles — remove manual recycle on ODA objects."
     ),
     "DOM-005": (
         "Raw `lotus.domino` objects are mixed with ODA APIs without `Factory.fromLotus()`, "
@@ -139,6 +138,11 @@ PROBLEM_BREAKDOWNS: dict[str, str] = {
     "DOM-024": (
         "Code calls `.recycle()` on platform-owned globals (session, getCurrentDatabase / XPages "
         "`database`, or dominoNAF). Those must never be recycled; missing recycle on them is NOT a leak."
+    ),
+    "DOM-025": (
+        "ODA view/collection loop recycles org.openntf.domino wrappers without unwrapping via "
+        "Factory.getWrapperFactory().toLotus(...). Causes SessionModerator deadlock; unwrap to "
+        "lotus.domino then recycle lotus Document/Entry handles in finally."
     ),
     "LS-DOM-008": (
         "Search / FTSearch inside a LotusScript loop without Delete of the returned collection."
@@ -321,6 +325,24 @@ REMEDIATION_GUIDES: dict[str, dict[str, str]] = {
         "java": (
             "Never recycle session, getCurrentDatabase()/XPages database, or dominoNAF. "
             "Only recycle Database handles you opened via getDatabase."
+        ),
+    },
+    "DOM-004": {
+        "java": (
+            "Remove .recycle() on org.openntf.domino.* wrappers — ODA owns lifecycle. "
+            "For high-volume loops, unwrap with toLotus() and recycle lotus.domino handles only."
+        ),
+    },
+    "DOM-025": {
+        "java": (
+            "lotus.domino.View lotusView = Factory.getWrapperFactory().toLotus(odaView);\n"
+            "lotus.domino.Document doc = lotusView.getFirstDocument();\n"
+            "while (doc != null) {\n"
+            "  lotus.domino.Document next = lotusView.getNextDocument(doc);\n"
+            "  try { /* work */ } finally { doc.recycle(); }\n"
+            "  doc = next;\n"
+            "}\n"
+            "// Never call odaView.recycle() / odaDoc.recycle()"
         ),
     },
     "LS-DOM-008": {
@@ -996,24 +1018,30 @@ def remediation_template(
             "doc = nextDoc;"
         ),
         "DOM-004": (
-            "// Do not trust ODA auto-dispose — use explicit finally recycle:\n"
-            "lotus.domino.Document doc = null;\n"
-            "try {\n"
-            "  doc = database.getDocumentByUNID(unid);\n"
-            "  String subject = doc.getItemValueString(\"Subject\");\n"
-            "} finally {\n"
-            "  if (doc != null) doc.recycle();\n"
-            "}"
+            "// ODA wrappers: NEVER call .recycle() — SessionModerator deadlock risk.\n"
+            "org.openntf.domino.Document doc = db.getDocumentByUNID(unid);\n"
+            "String subject = doc.getItemValueString(\"Subject\");\n"
+            "// ODA disposes at request/thread end"
+        ),
+        "DOM-025": (
+            "// High-volume ODA loop — unwrap then recycle lotus handles:\n"
+            "lotus.domino.View lotusView =\n"
+            "    Factory.getWrapperFactory().toLotus(odaView);\n"
+            "lotus.domino.Document doc = lotusView.getFirstDocument();\n"
+            "while (doc != null) {\n"
+            "  lotus.domino.Document next = lotusView.getNextDocument(doc);\n"
+            "  try {\n"
+            "    // process\n"
+            "  } finally {\n"
+            "    doc.recycle(); // lotus.domino only\n"
+            "  }\n"
+            "  doc = next;\n"
+            "}\n"
+            "// Do NOT: odaDoc.recycle();"
         ),
         "DOM-005": (
-            "// Prefer lotus.domino + explicit recycle over mixed ODA/lotus boundaries.\n"
-            "lotus.domino.Document doc = null;\n"
-            "try {\n"
-            "  doc = database.getDocumentByUNID(unid);\n"
-            "  // work\n"
-            "} finally {\n"
-            "  if (doc != null) doc.recycle();\n"
-            "}"
+            "org.openntf.domino.Document doc =\n"
+            "    Factory.fromLotus(lotusDoc, Document.class, database);"
         ),
         "DOM-006": (
             "// Do not store Session/Database/Document/View in static fields.\n"

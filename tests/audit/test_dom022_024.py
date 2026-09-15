@@ -145,14 +145,27 @@ def test_fp_guardrail_allows_finally_recycle_evidence():
     )
 
 
-def test_fp_guardrail_rejects_oda_ownership_excuse():
+def test_fp_guardrail_allows_pure_oda_missing_recycle():
     finding = _finding("DOM-001", "CRITICAL")
-    assert not _fp_guardrail_allows(
+    assert _fp_guardrail_allows(
         finding,
         {
             "verdict": "FALSE_POSITIVE",
             "reasoning": "ODA org.openntf.domino.Document auto-lifecycle",
             "evidence_quote": "org.openntf.domino.Document doc = db.getDocumentByUNID(u);",
         },
-        unit_body="import org.openntf.domino.Document;",
+        unit_body="import org.openntf.domino.Document;\norg.openntf.domino.Document doc = db.getDocumentByUNID(u);",
+    )
+
+
+def test_fp_guardrail_rejects_oda_recycle_deadlock():
+    finding = _finding("DOM-004", "CRITICAL")
+    assert not _fp_guardrail_allows(
+        finding,
+        {
+            "verdict": "FALSE_POSITIVE",
+            "reasoning": "ODA owns lifecycle so recycle is fine",
+            "evidence_quote": "doc.recycle();",
+        },
+        unit_body="import org.openntf.domino.Document;\ndoc.recycle();",
     )

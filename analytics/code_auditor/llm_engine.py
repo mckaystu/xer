@@ -28,53 +28,49 @@ HANDLE_ALLOC_HINT = re.compile(
 )
 
 FP_SYSTEM_PROMPT = """You are an expert static analysis validator and control-flow inference
-engine specializing in HCL Domino (64-bit Domino 14.5) native C-API handle lifecycle management
-across Java, SSJS, and XPages.
+engine specializing in HCL Domino 14.5, XPages, and OpenNTF Domino API (ODA) memory lifecycle
+management.
 
-Your task is to validate static rule findings, eliminate false positives without suppressing
-real leaks, and detect cross-module or framework-specific handle exhaustion risks.
+Primary objective: detect C-API handle leaks (BLK_OPENED_NOTE) while actively identifying ODA
+thread-deadlock anti-patterns caused by improper object recycling.
 
-### CORE ARCHITECTURAL CONTEXT
-1. Domino uses native C-handles (e.g., BLK_OPENED_NOTE, BLK_OBJECT) mapped to lightweight Java
-   objects. Standard Java GC does NOT clean them up in time. Un-recycled handles in loops exhaust
-   Domino's native handle table (130,944 limit) and crash nHTTP.
-2. OpenNTF Domino API (ODA — org.openntf.domino.*) *claims* to auto-manage handle lifecycles,
-   but you MUST ASSUME ODA request-end disposal is NOT working reliably in this environment.
-   Treat `org.openntf.domino.*` allocations like `lotus.domino` — require explicit `.recycle()`
-   in `finally` (or a verified cleanup method). Never mark a missing-recycle finding
-   FALSE_POSITIVE solely because the type is ODA.
-3. Scope: Java / SSJS / XPages only (not LotusScript, not browser CSJS).
+### DUAL-FRAMEWORK DISTINCTION
+1. Pure `lotus.domino.*` objects MUST be released with `.recycle()` in `finally` (or a verified
+   cleanup method) to prevent handle-table saturation (130,944 limit / BLK_OPENED_NOTE).
+2. OpenNTF Domino API (`org.openntf.domino.*`) AUTOMATICALLY manages native handle lifecycles.
+   Missing `.recycle()` on pure ODA types is NOT a leak → FALSE_POSITIVE is appropriate when
+   the unit is ODA-managed (no raw lotus.domino mix requiring manual recycle).
+3. Scope: Java / SSJS / XPages only (not LotusScript C-API, not browser CSJS).
 
-### CRITICAL SEVERITY GUARDRAIL (MANDATORY)
-NEVER demote or mark a CRITICAL rule finding (especially DOM-001, DOM-002, DOM-015, DOM-018,
-DOM-022, DOM-023, DOM-024) as FALSE_POSITIVE unless you explicitly verify:
-  An explicit `.recycle()` of EVERY allocated handle named in the finding inside a guaranteed
-  `finally` block or a verified cleanup method for those same variables.
-ODA / Factory / “auto lifecycle” is NOT sufficient evidence.
-If a loop advances via getNextDocument() / getNextEntry() / getNextCategory() and the prior
-object is not explicitly recycled in the loop or in finally → verdict MUST be VERIFIED
-(CRITICAL). Do not use speculation.
+### DEADLOCK PREVENTION (DOM-004 / DOM-025) — CRITICAL
+Calling `.recycle()` on `org.openntf.domino.*` wrapper instances is a CRITICAL BUG. It induces
+lock contention on SessionModerator during WrapperFactory.recycle() / Factory.termThread(),
+causing Java thread deadlocks and abnormal HTTP terminations.
+- DOM-004: any direct `.recycle()` on ODA wrappers → ALWAYS VERIFIED (CRITICAL). Never FP.
+- DOM-025: ODA collection/view loops that manually recycle ODA objects OR iterate heavy
+  collections without unwrapping via toLotus() → ALWAYS VERIFIED (CRITICAL). Never FP.
+Safe high-volume pattern (Jesse Gallagher):
+  lotus.domino.View lotusView = Factory.getWrapperFactory().toLotus(odaView);
+  // then recycle lotus.domino.Document handles in finally — never the ODA wrapper
+
+### CRITICAL SEVERITY GUARDRAIL
+NEVER mark CRITICAL loop leaks (DOM-001, DOM-002, DOM-015, DOM-018, DOM-022) as FALSE_POSITIVE
+for lotus.domino unless you quote finally-recycle of every named handle.
+Exception: pure ODA-managed allocations (org.openntf.domino, no lotus.domino leak path) may be
+FALSE_POSITIVE for missing-recycle rules — but NEVER for DOM-004 / DOM-025.
+getNextDocument/Entry/Category without recycling the prior lotus handle → VERIFIED CRITICAL.
 
 ### ALSO ENFORCE
-- ODA types without explicit recycle → treat as REAL leaks (VERIFIED), same as lotus.domino.
-- Manual `.recycle()` on ODA objects (DOM-004) is a framework-conflict signal — keep VERIFIED
-  when fired, but never use ODA presence to suppress other leak rules.
-- Do NOT flag missing `.recycle()` on platform-owned globals: session, XPages `database`,
-  getCurrentDatabase(), or dominoNAF. Recycling those IS CRITICAL (DOM-020 / DOM-024).
-- Collection wrappers (DocumentCollection / ViewEntryCollection / ViewNavigator / Vector from
-  search / FTSearch / getItemValueDateTimeArray): recycling children but leaving the parent
-  wrapper un-recycled after the loop → VERIFIED (DOM-022), HIGH/CRITICAL.
-- XPages Managed Beans / sessionScope / viewScope / applicationScope holding live
-  lotus.domino.NotesBase (or ODA Document/Database) member fields across requests →
-  VERIFIED (DOM-023), HIGH.
+- Platform globals (session, XPages database, getCurrentDatabase, dominoNAF): do NOT require
+  recycle; recycling them is CRITICAL (DOM-020 / DOM-024).
+- Collection wrappers left un-recycled after child cleanup (lotus) → DOM-022.
+- Managed Bean / scope maps holding live NotesBase → DOM-023.
 
 ### VERDICTS
-- FALSE_POSITIVE — clear finally/cleanup recycle of the SAME vars, OR platform-global
-  (do not require recycle). Never on speculation. Never on “ODA owns this.”
-- VERIFIED_NON_LOOP — real missing cleanup but clearly outside any collection loop → hygiene
-  (MEDIUM/LOW). NEVER use for: static/scoped live handles, Session/current Database recycle,
-  or getNext* walks that skip recycle.
-- VERIFIED — real leak / anti-pattern (especially VERIFIED_LOOP_LEAK → CRITICAL).
+- FALSE_POSITIVE — finally-recycle of SAME vars, platform-global, OR pure ODA auto-lifecycle
+  (missing-recycle rules only). Never on speculation. Never for DOM-004/DOM-025.
+- VERIFIED_NON_LOOP — real lotus missing cleanup outside loops → hygiene (not for DOM-004/025).
+- VERIFIED — real leak or ODA deadlock anti-pattern.
 
 Return ONLY valid JSON:
 {
@@ -86,15 +82,16 @@ Return ONLY valid JSON:
       "confidence": 0-100,
       "confidence_score": 0-100,
       "severity_adjusted": "CRITICAL|HIGH|MEDIUM|LOW",
-      "rationale": "cite allocation, loop context, cleanup status",
-      "reasoning": "1-3 sentences; quote the cleanup line or why unsafe",
+      "framework_detected": "LOTUS_NATIVE|OPENNTF_ODA|MIXED",
+      "rationale": "cite allocation, loop context, cleanup; leak vs SessionModerator deadlock",
+      "reasoning": "1-3 sentences; quote evidence",
       "in_loop": true,
-      "evidence_quote": "short code excerpt proving the verdict"
+      "evidence_quote": "short code excerpt proving the verdict",
+      "suggested_remediation": "lotus try/finally OR toLotus() unwrap pattern"
     }
   ]
 }
-Be conservative: when unsure, return VERIFIED. Prefer confidence ≥75; CRITICAL loop exhaustion
-paths may use slightly lower confidence but must stay VERIFIED.
+Be conservative on lotus leaks: when unsure, return VERIFIED. Prefer confidence ≥75.
 """
 
 NON_LOOP_AI_NOTE = (
@@ -122,8 +119,8 @@ _NON_LOOP_DEMOTE_RULES = frozenset(
     }
 )
 
-# CRITICAL findings: FP only with finally-recycle evidence (host-enforced).
-# ODA / Factory auto-lifecycle is NOT accepted — assume ODA disposal is unreliable.
+# CRITICAL findings: FP only with finally-recycle evidence (or pure ODA for missing-recycle).
+# DOM-004 / DOM-025 (ODA deadlock) are NEVER false positives.
 _CRITICAL_FP_GUARDED_RULES = frozenset(
     {
         "DOM-001",
@@ -136,31 +133,55 @@ _CRITICAL_FP_GUARDED_RULES = frozenset(
         "DOM-022",
         "DOM-023",
         "DOM-024",
+        "DOM-025",
     }
 )
 
-BLIND_SPOT_SYSTEM_PROMPT = """You are an expert Domino C-API handle validator hunting BLIND-SPOT
-leaks in Java / SSJS / XPages (Domino 14.5). Static regex rules found ZERO issues, but handles
-appear allocated.
+# Missing-recycle rules where pure ODA auto-lifecycle can justify FALSE_POSITIVE.
+_ODA_MISSING_RECYCLE_FP_RULES = frozenset(
+    {
+        "DOM-001",
+        "DOM-002",
+        "DOM-003",
+        "DOM-010",
+        "DOM-011",
+        "DOM-012",
+        "DOM-013",
+        "DOM-014",
+        "DOM-015",
+        "DOM-016",
+        "DOM-017",
+        "DOM-018",
+        "DOM-019",
+        "DOM-021",
+        "DOM-022",
+        "DOM-BS-001",
+    }
+)
+
+# ODA deadlock / wrapper-recycle rules — never demote via NON_LOOP or FP.
+_ODA_DEADLOCK_RULES = frozenset({"DOM-004", "DOM-025"})
+
+BLIND_SPOT_SYSTEM_PROMPT = """You are an expert Domino 14.5 / ODA handle validator hunting
+BLIND-SPOT issues in Java / SSJS / XPages. Static regex rules found ZERO issues.
 
 ONLY report a blind spot when ALL are true:
-1) Name a specific variable that receives a Domino handle (Document/View/Item/Collection/…)
-2) Quote the allocation line AND show that variable is not recycled on that path
-3) Confidence is high (prefer ≥85; ≥75 minimum unless CRITICAL loop exhaustion)
+1) Name a specific variable that receives a Domino handle
+2) Quote allocation AND show the unsafe path (missing lotus recycle OR illegal ODA recycle)
+3) Confidence high (prefer ≥85; ≥75 minimum unless CRITICAL)
 
 High-precision patterns:
-- temp-next walks: next = coll.getNextDocument(doc); …; doc = next; with no doc.recycle()
-- getNextEntry / getNextCategory walks skipping prior recycle
-- Collection/Vector/Stream wrappers left un-recycled after child elements are recycled (DOM-022)
-- Managed Bean / scope map fields holding live lotus.domino.NotesBase across requests (DOM-023)
-- early return / catch after allocation without recycle
+- lotus.domino temp-next walks without doc.recycle()
+- Collection wrappers left un-recycled after child cleanup (lotus)
+- Managed Bean / scope holding live NotesBase
+- ODA wrappers calling .recycle() (SessionModerator deadlock — DOM-004/025)
+- ODA collection loops recycling wrappers without Factory.getWrapperFactory().toLotus()
 
 Do NOT report:
+- Missing recycle on pure org.openntf.domino.* (ODA auto-manages lifecycle)
 - Missing recycle on platform globals: session, XPages database, getCurrentDatabase(), dominoNAF
-- import statements or type declarations with no allocation
-- speculative "might leak" without a named unclean variable
+- import-only / speculative "might leak"
 
-DO report missing recycle on org.openntf.domino.* types — assume ODA auto-dispose is unreliable.
 Return ONLY valid JSON:
 {
   "blind_spots": [
@@ -169,18 +190,19 @@ Return ONLY valid JSON:
       "severity": "CRITICAL|HIGH|MEDIUM|LOW",
       "confidence": 0-100,
       "confidence_score": 0-100,
+      "framework_detected": "LOTUS_NATIVE|OPENNTF_ODA|MIXED",
       "line_hint": 1,
       "unclean_var": "doc",
-      "evidence": "short code excerpt showing alloc + missing recycle",
-      "technical_impact": "why it matters",
-      "remediation": "fixed pattern guidance",
+      "evidence": "short excerpt",
+      "technical_impact": "BLK_OPENED_NOTE leak OR SessionModerator deadlock",
+      "remediation": "lotus finally recycle OR toLotus() unwrap pattern",
       "action_required": "short action",
-      "rationale": "cite allocation, loop context, cleanup status",
+      "rationale": "cite framework + cleanup status",
       "reasoning": "why static rules missed this"
     }
   ]
 }
-If the code is genuinely safe, return {"blind_spots": []}.
+If genuinely safe, return {"blind_spots": []}.
 """
 
 PASS3_SYSTEM_PROMPT = """You are a Domino architecture expert performing CROSS-MODULE handle ownership
@@ -223,21 +245,22 @@ Return ONLY valid JSON:
 If nothing is clear, return empty arrays. Prefer confidence ≥85 for ownership gaps.
 """
 
-INVENTORY_FP_SYSTEM_PROMPT = """You are an expert Domino C-API handle validator reviewing Function
-& Recycle Inventory classifications (Java / SSJS / XPages, Domino 14.5).
+INVENTORY_FP_SYSTEM_PROMPT = """You are an expert Domino 14.5 / ODA handle validator reviewing
+Function & Recycle Inventory classifications (Java / SSJS / XPages).
 
-CRITICAL GUARDRAIL: Never mark FALSE_POSITIVE on a function with getNextDocument /
-getNextEntry / getNextCategory walks that skip recycling the prior object, unless you quote
-finally-block recycle of every handle. ODA / Factory / “auto lifecycle” is NOT enough —
-assume ODA request-end disposal is unreliable.
+DUAL-FRAMEWORK:
+- lotus.domino: missing recycle in loops is real risk (VERIFIED).
+- org.openntf.domino (pure ODA): auto-lifecycle → FALSE_POSITIVE for missing recycle is OK.
+- Manual .recycle() on ODA wrappers → VERIFIED CRITICAL (deadlock). Never FP.
+
+CRITICAL GUARDRAIL: Never mark FALSE_POSITIVE on getNext* walks that skip recycling prior
+lotus handles unless you quote finally-recycle. Never FP ODA wrapper .recycle() (DOM-004/025).
 
 Decide for each:
-- FALSE_POSITIVE — not a real handle-table risk. Examples: handle returned and clearly
-  caller-owned with recycle on the caller path; recycle via a helper in this body; platform
-  globals (session / XPages database / dominoNAF) that must NOT be recycled; false regex match.
-  NOT valid: “uses org.openntf.domino so ODA cleans it up.”
-- VERIFIED_NON_LOOP — missing cleanup is real but one-shot / not in a collection loop → hygiene.
-- VERIFIED — real risk; keep (especially loops, collection wrappers, scoped live handles, ODA).
+- FALSE_POSITIVE — pure ODA auto-lifecycle; caller-owned with recycle; platform globals;
+  false regex match.
+- VERIFIED_NON_LOOP — lotus missing cleanup, one-shot → hygiene.
+- VERIFIED — real lotus leak OR ODA deadlock anti-pattern.
 
 Return ONLY valid JSON:
 {
@@ -248,13 +271,13 @@ Return ONLY valid JSON:
       "confidence": 0-100,
       "confidence_score": 0-100,
       "severity_adjusted": "CRITICAL|HIGH|MEDIUM|LOW",
-      "rationale": "cite allocation, loop context, cleanup status",
+      "framework_detected": "LOTUS_NATIVE|OPENNTF_ODA|MIXED",
+      "rationale": "cite framework + cleanup",
       "reasoning": "1-3 sentences"
     }
   ]
 }
-Be conservative on FALSE_POSITIVE — only when cleanup ownership or framework lifecycle is clear.
-Prefer confidence ≥75; low-confidence reviews are discarded by the host.
+Prefer confidence ≥75; low-confidence reviews are discarded.
 """
 
 
@@ -305,24 +328,21 @@ def _fp_guardrail_allows(
     *,
     unit_body: str = "",
 ) -> bool:
-    """CRITICAL findings may only be FALSE_POSITIVE with finally-recycle evidence.
+    """CRITICAL findings need finally-recycle evidence; pure ODA may FP missing-recycle.
 
-    ODA / Factory auto-lifecycle is intentionally rejected — assume ODA disposal is unreliable.
+    DOM-004 / DOM-025 (ODA wrapper recycle / deadlock) are never FALSE_POSITIVE.
     """
+    if finding.rule_id in _ODA_DEADLOCK_RULES:
+        return False
+
     if finding.severity != "CRITICAL" and finding.rule_id not in _CRITICAL_FP_GUARDED_RULES:
         return True
-
-    # DOM-004 is a framework-conflict signal — never accept as FP via "ODA owns it"
-    if finding.rule_id == "DOM-004":
-        return False
 
     blob = " ".join(
         [
             str(review.get("evidence_quote") or ""),
             _review_reasoning(review),
-            # Do NOT fold unit_body into the allow check for ODA types — presence of
-            # org.openntf.domino in source must not approve a FALSE_POSITIVE.
-            "",
+            unit_body[:4000],
         ]
     ).lower()
 
@@ -333,9 +353,21 @@ def _fp_guardrail_allows(
     if finally_recycle:
         return True
 
-    # Explicit cleanup helper named in evidence (not an ODA excuse)
+    # Pure ODA auto-lifecycle can clear missing-recycle style findings
+    if finding.rule_id in _ODA_MISSING_RECYCLE_FP_RULES:
+        oda = bool(
+            re.search(r"org\.openntf\.domino|\boda\b", blob)
+            or re.search(r"org\.openntf\.domino", unit_body or "", re.I)
+        )
+        lotus_raw = bool(re.search(r"lotus\.domino", unit_body or "", re.I))
+        mixed_unwrapped = lotus_raw and not re.search(
+            r"Factory\.fromLotus|fromLotus\s*\(", unit_body or "", re.I
+        )
+        if oda and not mixed_unwrapped:
+            return True
+
     if re.search(r"\b(cleanup|dispose|recycleall|recyclenotes)\w*\s*\(", blob):
-        if not re.search(r"\boda\b|openntf|auto[- ]?lifecycle", blob):
+        if not re.search(r"wrapperfactory\.recycle|sessionmoderator", blob):
             return True
 
     return False
@@ -473,8 +505,8 @@ def _pass1_false_positive_filter(
                     finding.ai_validation_status = "VERIFIED"
                     finding.ai_validation_reasoning = (
                         (reasoning or "AI proposed FALSE_POSITIVE")
-                        + " | CRITICAL guardrail rejected FP without finally-recycle evidence "
-                        "(ODA auto-lifecycle is not trusted)."
+                        + " | CRITICAL guardrail rejected FP without finally-recycle or "
+                        "pure-ODA ownership evidence."
                     ).strip()
                     finding.is_false_positive = False
                     finding.engine = "hybrid" if finding.engine == "rules" else finding.engine
@@ -986,7 +1018,7 @@ def enrich_inventory_with_llm(
                     ).strip()
                 continue
             if verdict == "FALSE_POSITIVE":
-                # CRITICAL in-loop inventory hits need finally-recycle evidence (not ODA).
+                # CRITICAL lotus in-loop needs finally; pure ODA missing-recycle may pass
                 blob = (reasoning + " " + str(review.get("evidence_quote") or "")).lower()
                 guarded = (
                     rec.risk_severity == "CRITICAL"
@@ -995,25 +1027,30 @@ def enrich_inventory_with_llm(
                 finally_ok = bool(
                     re.search(r"\bfinally\b", blob) and re.search(r"recycle\s*\(", blob)
                 )
-                if guarded and not finally_ok:
+                oda_ok = bool(
+                    re.search(r"\boda\b|openntf|auto[- ]?lifecycle", blob)
+                )
+                # Illegal: FP for ODA *recycle* deadlock — keep if rationale is only ODA recycle
+                oda_recycle_bug = bool(
+                    re.search(r"recycle", blob)
+                    and re.search(r"\boda\b|openntf", blob)
+                    and re.search(r"deadlock|wrapper|sessionmoderator|dom-004|dom-025", blob)
+                )
+                if oda_recycle_bug:
                     rec.ai_validation_status = "VERIFIED"
                     rec.ai_validation_reasoning = (
                         (reasoning or "AI proposed FALSE_POSITIVE")
-                        + " | CRITICAL guardrail rejected FP without finally-recycle evidence "
-                        "(ODA auto-lifecycle is not trusted)."
+                        + " | ODA wrapper recycle is CRITICAL (SessionModerator deadlock)."
                     ).strip()
                     rec.is_false_positive = False
                     rec.triage_source = "ai"
                     continue
-                # Also reject bare ODA excuses even for non-guarded rows
-                if (
-                    re.search(r"\boda\b|openntf|auto[- ]?lifecycle", blob)
-                    and not finally_ok
-                ):
+                if guarded and not (finally_ok or oda_ok):
                     rec.ai_validation_status = "VERIFIED"
                     rec.ai_validation_reasoning = (
                         (reasoning or "AI proposed FALSE_POSITIVE")
-                        + " | Rejected ODA auto-lifecycle excuse — require explicit recycle."
+                        + " | CRITICAL guardrail rejected FP without finally-recycle or "
+                        "ODA auto-lifecycle evidence."
                     ).strip()
                     rec.is_false_positive = False
                     rec.triage_source = "ai"

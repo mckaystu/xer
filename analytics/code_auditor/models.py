@@ -25,9 +25,9 @@ RULE_CATALOG: dict[str, dict[str, str]] = {
         "default_severity": "HIGH",
     },
     "DOM-004": {
-        "title": "ODA Dual-Lifecycle Conflict (manual recycle vs unreliable auto-dispose)",
+        "title": "Manual recycle() on ODA Wrapper Objects (SessionModerator Deadlock)",
         "category": "Framework Conflicts",
-        "default_severity": "HIGH",
+        "default_severity": "CRITICAL",
     },
     "DOM-005": {
         "title": "Mixed lotus.domino / ODA Object Passing",
@@ -162,6 +162,11 @@ RULE_CATALOG: dict[str, dict[str, str]] = {
     "DOM-024": {
         "title": "Recycle of Platform-Owned Global (session / current DB / dominoNAF)",
         "category": "C-API Handle Leaks & Object Recycling",
+        "default_severity": "CRITICAL",
+    },
+    "DOM-025": {
+        "title": "ODA Inner-Loop Anti-Pattern / Missing Lotus Unwrapping (toLotus)",
+        "category": "Framework Conflicts",
         "default_severity": "CRITICAL",
     },
     "LS-DOM-008": {

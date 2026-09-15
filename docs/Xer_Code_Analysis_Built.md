@@ -63,7 +63,7 @@ DXL / ODP / application graph
 | DOM-001 | Inline chained Domino construction |
 | DOM-002 | Un-recycled collection iteration |
 | DOM-003 / DOM-010 | Missing try/finally recycle scaffolding |
-| DOM-004 / DOM-005 | ODA vs `lotus.domino` conflicts |
+| DOM-004 / DOM-005 | ODA wrapper `.recycle()` deadlock (CRITICAL) / mixed lotus↔ODA |
 | DOM-006 / DOM-007 | Static / scoped live handles |
 | DOM-008 / DOM-009 | Expensive fetches / `createDateTime` in hot paths |
 | DOM-011 … DOM-013 | Parent/child recycle order, conditional recycle, re-assignment |
@@ -78,8 +78,9 @@ DXL / ODP / application graph
 | DOM-022 | Collection / Vector wrapper left un-recycled after child cleanup |
 | DOM-023 | XPages Managed Bean / scope map holds live NotesBase |
 | DOM-024 | Recycle of platform globals (session / current DB / dominoNAF) |
+| DOM-025 | ODA inner-loop anti-pattern — recycle without `toLotus()` unwrap |
 
-**Risk hierarchy (worse → milder):** Document/entry walks & navigators → multi-doc collections & attachments/MIME in loops → static/scoped live handles → one-shot hygiene. Never recycle Session, XPages current `database`, or `dominoNAF`. **Do not trust ODA auto-dispose** — treat `org.openntf.domino.*` like `lotus.domino` and require explicit `.recycle()` in `finally`.
+**Risk hierarchy (worse → milder):** Document/entry walks & navigators → multi-doc collections & attachments/MIME in loops → static/scoped live handles → one-shot hygiene. Never recycle Session, XPages current `database`, or `dominoNAF`. **ODA (`org.openntf.domino.*`) auto-manages lifecycle** — do not call `.recycle()` on ODA wrappers (SessionModerator deadlock). For high-volume ODA loops, unwrap with `Factory.getWrapperFactory().toLotus(...)` then recycle `lotus.domino` handles.
 
 ### LotusScript — out of scope
 
