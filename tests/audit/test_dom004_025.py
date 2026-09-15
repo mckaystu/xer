@@ -74,6 +74,25 @@ void walk(View odaView) {
 }
 """
     assert detect_dom025(_unit(body)) == []
+    # lotus.domino recycle after toLotus must not raise DOM-004
+    assert detect_dom004(_unit(body)) == []
+
+
+def test_dom025_heavy_loop_without_tolotus_even_without_recycle():
+    body = """
+import org.openntf.domino.View;
+import org.openntf.domino.Document;
+void walk(View odaView) {
+  Document doc = odaView.getFirstDocument();
+  while (doc != null) {
+    Document next = odaView.getNextDocument(doc);
+    String s = doc.getItemValueString("Subject");
+    doc = next;
+  }
+}
+"""
+    hits = detect_dom025(_unit(body))
+    assert any(f.rule_id == "DOM-025" for f in hits)
 
 
 def test_pure_oda_missing_recycle_skipped_by_engine():
@@ -85,5 +104,5 @@ public void load(org.openntf.domino.Database db) {
 }
 """
     findings = run_rule_engine([_unit(body)])
-    # No missing-recycle DOM hits; no DOM-004 (no recycle call)
-    assert not any(f.rule_id in {"DOM-002", "DOM-010", "DOM-001"} for f in findings)
+    # No missing-recycle DOM hits; no DOM-004 (no recycle call); one-shot not DOM-025
+    assert not any(f.rule_id in {"DOM-002", "DOM-010", "DOM-001", "DOM-025"} for f in findings)

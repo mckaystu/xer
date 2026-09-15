@@ -517,9 +517,9 @@ def oda_refactoring_remediation(
         # Pattern B — Jesse Gallagher Inner-Loop Unwrapping
         return (
             f"{header}"
-            "// PATTERN B (DOM-025): Jesse Gallagher Inner-Loop Unwrapping Pattern\n"
-            "// ODA auto-teardown in heavy loops causes GC pressure + SessionModerator contention.\n"
-            "// Never call .recycle() on org.openntf.domino wrappers — unwrap first.\n"
+            "// TO-BE PATTERN B (DOM-025): Jesse Gallagher Inner-Loop Unwrapping\n"
+            "// Heavy ODA walks without unwrap → GC churn + SessionModerator contention.\n"
+            "// Never .recycle() org.openntf.domino wrappers — unwrap first.\n"
             f"{decl}{view_var} = db.getView(\"MyView\");  // ODA view (adapt name)\n"
             f"{decl}lotusView = org.openntf.domino.utils.Factory.getWrapperFactory()"
             f".toLotus({view_var});\n"
@@ -529,6 +529,7 @@ def oda_refactoring_remediation(
             f"  {decl}nextDoc = lotusView.getNextDocument({doc_var});\n"
             "  try {\n"
             f"    // Keep existing per-document work from {fname or 'this routine'}\n"
+            "    // If using getColumnValues(), recycle that Vector each iteration too\n"
             "  } finally {\n"
             f"    if ({doc_var} != null) {{ {doc_var}.recycle(); }}  // lotus.domino only\n"
             "  }\n"
@@ -541,21 +542,17 @@ def oda_refactoring_remediation(
     if ssjs:
         return (
             f"{header}"
-            "// PATTERN A (DOM-004): Standard / One-Shot ODA Remediation\n"
-            "// Remove all manual .recycle() on org.openntf.domino.* — ODA disposes at request teardown.\n"
-            "// Do NOT wrap in try/finally solely for recycle.\n"
+            "// TO-BE: Remove manual .recycle() when using org.openntf.domino.*\n"
             "var doc = db.getDocumentByUNID(unid);\n"
             "var subject = doc.getItemValueString(\"Subject\");\n"
-            "// Keep existing business logic; delete any doc.recycle() / finally-recycle blocks"
+            "// ODA disposes handles automatically at request teardown - DO NOT call doc.recycle()"
         )
     return (
         f"{header}"
-        "// PATTERN A (DOM-004): Standard / One-Shot ODA Remediation\n"
-        "// Remove all manual .recycle() on org.openntf.domino.* — ODA disposes at request teardown.\n"
-        "// Do NOT wrap in try/finally solely for recycle.\n"
+        "// TO-BE: Remove manual .recycle() when using org.openntf.domino.*\n"
         "org.openntf.domino.Document doc = db.getDocumentByUNID(unid);\n"
         "String subject = doc.getItemValueString(\"Subject\");\n"
-        "// Keep existing business logic; delete any doc.recycle() / finally-recycle blocks"
+        "// ODA disposes handles automatically at request teardown - DO NOT call doc.recycle()"
     )
 
 

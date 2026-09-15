@@ -90,8 +90,7 @@ def test_oda_pattern_a_one_shot_removes_recycle():
         has_loop=False,
         rule_id="DOM-004",
     )
-    assert "PATTERN A" in to_be
-    assert "Remove all manual .recycle()" in to_be or "remove" in to_be.lower()
+    assert "Remove manual .recycle()" in to_be or "DO NOT call doc.recycle()" in to_be
     assert "try {" not in to_be
     assert "toLotus" not in to_be
     guide = contextual_remediation_guide(

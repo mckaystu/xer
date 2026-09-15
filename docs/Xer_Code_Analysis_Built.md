@@ -80,7 +80,7 @@ DXL / ODP / application graph
 | DOM-024 | Recycle of platform globals (session / current DB / dominoNAF) |
 | DOM-025 | ODA inner-loop anti-pattern — recycle without `toLotus()` unwrap |
 
-**Risk hierarchy (worse → milder):** Document/entry walks & navigators → multi-doc collections & attachments/MIME in loops → static/scoped live handles → one-shot hygiene. Never recycle Session, XPages current `database`, or `dominoNAF`. **ODA (`org.openntf.domino.*`) auto-manages lifecycle** — do not call `.recycle()` on ODA wrappers (SessionModerator deadlock). To-Be remediations use **PATTERN A** (one-shot: remove ODA `.recycle()`) or **PATTERN B** (Jesse Gallagher: `toLotus()` unwrap + recycle `lotus.domino` handles in loops).
+**Risk hierarchy (worse → milder):** Document/entry walks & navigators → multi-doc collections & attachments/MIME in loops → static/scoped live handles → one-shot hygiene. Never recycle Session, XPages current `database`, or `dominoNAF`. **Rule A** (`lotus.domino.*`): `.recycle()` in `finally`. **Rule B / DOM-004**: never `.recycle()` ODA wrappers (SessionModerator deadlock). **Rule C / DOM-025**: heavy ODA loops must `toLotus()` then recycle lotus handles (Jesse Gallagher). To-Be uses **PATTERN A** (one-shot remove ODA recycle) or **PATTERN B** (unwrap + lotus recycle).
 
 ### LotusScript — out of scope
 

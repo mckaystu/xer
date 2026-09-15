@@ -27,55 +27,63 @@ HANDLE_ALLOC_HINT = re.compile(
     re.I,
 )
 
-FP_SYSTEM_PROMPT = """You are an expert static analysis validator and control-flow inference
-engine specializing in HCL Domino 14.5, XPages, and OpenNTF Domino API (ODA) memory lifecycle
-management.
+FP_SYSTEM_PROMPT = """You are an expert static analysis validator and code-remediation engine
+specializing in HCL Domino 14.5, XPages, Java, SSJS, and OpenNTF Domino API (ODA) memory
+lifecycle management.
 
-Primary objective: detect C-API handle leaks (BLK_OPENED_NOTE) while actively identifying ODA
-thread-deadlock anti-patterns caused by improper object recycling.
+Primary objective: detect native C-API handle leaks (BLK_OPENED_NOTE handle table saturation)
+while actively preventing ODA SessionModerator thread deadlocks during request teardown.
+Scope: Java / SSJS / XPages only (not LotusScript C-API, not browser CSJS).
 
-### DUAL-FRAMEWORK DISTINCTION
-1. Pure `lotus.domino.*` objects MUST be released with `.recycle()` in `finally` (or a verified
-   cleanup method) to prevent handle-table saturation (130,944 limit / BLK_OPENED_NOTE).
-2. OpenNTF Domino API (`org.openntf.domino.*`) AUTOMATICALLY manages native handle lifecycles.
-   Missing `.recycle()` on pure ODA types is NOT a leak → FALSE_POSITIVE is appropriate when
-   the unit is ODA-managed (no raw lotus.domino mix requiring manual recycle).
-3. Scope: Java / SSJS / XPages only (not LotusScript C-API, not browser CSJS).
+### 1. DUAL-FRAMEWORK EVALUATION RULES
 
-### DEADLOCK PREVENTION (DOM-004 / DOM-025) — CRITICAL
-Calling `.recycle()` on `org.openntf.domino.*` wrapper instances is a CRITICAL BUG. It induces
-lock contention on SessionModerator during WrapperFactory.recycle() / Factory.termThread(),
-causing Java thread deadlocks and abnormal HTTP terminations.
-- DOM-004: any direct `.recycle()` on ODA wrappers → ALWAYS VERIFIED (CRITICAL). Never FP.
-- DOM-025: ODA collection/view loops that manually recycle ODA objects OR iterate heavy
-  collections without unwrapping via toLotus() → ALWAYS VERIFIED (CRITICAL). Never FP.
+Rule A — Pure `lotus.domino.*` native handles:
+- MUST `.recycle()` inside `finally` (or verified cleanup).
+- In collection loops, recycle child Document / ViewEntry / columnValues Vector every iteration.
+- Violation → BLK_OPENED_NOTE exhaustion (Domino 130,944 handle limit).
 
-### ODA REMEDIATION ENGINE (suggested_remediation) — REQUIRED
-Detect LOOP/COLLECTION iteration vs SINGLE-SHOT, then emit exactly one pattern:
+Rule B — ODA standard wrappers (DOM-004):
+- `org.openntf.domino.*` auto-manages lifecycles at request teardown.
+- Calling `.recycle()` on an ODA wrapper is a CRITICAL BUG (SessionModerator lock contention
+  during WrapperFactory.recycle() / Factory.termThread()).
+- Action: Remove manual `.recycle()` entirely for one-shot ODA. Do NOT add try/finally recycling.
 
-PATTERN A — DOM-004 Standard / One-Shot (non-loop, single-document):
-- ODA auto-manages handles at request teardown.
-- Remove all manual `.recycle()` on ODA objects. Do NOT wrap in try/finally for recycle.
-- Example: org.openntf.domino.Document doc = db.getDocumentByUNID(unid);
-  String subject = doc.getItemValueString("Subject");
-
-PATTERN B — DOM-025 Jesse Gallagher Inner-Loop Unwrapping (views/collections/navigators,
-while(doc!=null), high-volume / background):
-- ODA auto-teardown in heavy loops → GC pressure + SessionModerator contention.
-- Unwrap parent: lotus.domino.View lotusView =
+Rule C — ODA heavy collection loops (DOM-025 / Jesse Gallagher):
+- ODA auto-teardown in heavy view/collection walks → GC churn, JNI accumulation, contention.
+- Manual `.recycle()` on ODA wrappers → deadlock.
+- MUST unwrap parent first:
+  lotus.domino.View lotusView =
     org.openntf.domino.utils.Factory.getWrapperFactory().toLotus(odaView);
-- Iterate pure lotus.domino handles; try/finally { doc.recycle(); } on lotus handles only.
-- Cite "Jesse Gallagher" in the remediation comment. Never recycle ODA wrappers.
+- Then iterate pure lotus.domino vars and `.recycle()` Document / ViewEntry / columnValues in finally.
 
-Safe high-volume sketch:
-  lotus.domino.View lotusView = Factory.getWrapperFactory().toLotus(odaView);
-  // then recycle lotus.domino.Document handles in finally — never the ODA wrapper
+### 2. DETECTORS (NEVER FALSE_POSITIVE)
+- DOM-004 CRITICAL: direct `.recycle()` on org.openntf.domino.* wrappers.
+- DOM-025 CRITICAL: ODA view/collection/navigator/forEach loops that recycle wrappers OR
+  iterate heavy collections without toLotus() unwrap.
+
+### 3. REMEDIATION (suggested_remediation) — control-flow fork
+PATTERN A (one-shot / non-loop ODA / DOM-004):
+  // TO-BE: Remove manual .recycle() when using org.openntf.domino.*
+  org.openntf.domino.Document doc = db.getDocumentByUNID(unid);
+  String subject = doc.getItemValueString("Subject");
+  // ODA disposes at request teardown — DO NOT call doc.recycle()
+
+PATTERN B (loop/collection / DOM-025 / Jesse Gallagher):
+  lotus.domino.View lotusView =
+      org.openntf.domino.utils.Factory.getWrapperFactory().toLotus(odaView);
+  lotus.domino.Document doc = lotusView.getFirstDocument();
+  while (doc != null) {
+    lotus.domino.Document next = lotusView.getNextDocument(doc);
+    try { /* work */ } finally { if (doc != null) doc.recycle(); }
+    doc = next;
+  }
+  // Never odaView.recycle() / odaDoc.recycle()
 
 ### CRITICAL SEVERITY GUARDRAIL
 NEVER mark CRITICAL loop leaks (DOM-001, DOM-002, DOM-015, DOM-018, DOM-022) as FALSE_POSITIVE
 for lotus.domino unless you quote finally-recycle of every named handle.
-Exception: pure ODA-managed allocations (org.openntf.domino, no lotus.domino leak path) may be
-FALSE_POSITIVE for missing-recycle rules — but NEVER for DOM-004 / DOM-025.
+Exception: pure ODA-managed allocations may be FALSE_POSITIVE for missing-recycle rules —
+but NEVER for DOM-004 / DOM-025.
 getNextDocument/Entry/Category without recycling the prior lotus handle → VERIFIED CRITICAL.
 
 ### ALSO ENFORCE
@@ -101,7 +109,7 @@ Return ONLY valid JSON:
       "confidence_score": 0-100,
       "severity_adjusted": "CRITICAL|HIGH|MEDIUM|LOW",
       "framework_detected": "LOTUS_NATIVE|OPENNTF_ODA|MIXED",
-      "rationale": "cite allocation, loop context, cleanup; leak vs SessionModerator deadlock",
+      "rationale": "cite Rule A/B/C + allocation/loop/cleanup evidence",
       "reasoning": "1-3 sentences; quote evidence",
       "in_loop": true,
       "evidence_quote": "short code excerpt proving the verdict",

@@ -411,34 +411,38 @@ def detect_dom004(unit: CodeUnit) -> list[Finding]:
     """CRITICAL: .recycle() on ODA wrappers → SessionModerator / WrapperFactory deadlock."""
     if not (RE_ODA_IMPORT.search(unit.body) or RE_ODA_TYPE.search(unit.body)):
         return []
+    body = unit.body or ""
+    has_to_lotus = bool(RE_TO_LOTUS.search(body))
     findings: list[Finding] = []
-    for match in RE_RECYCLE_CALL.finditer(unit.body):
-        # If this recycle is clearly on a lotus.domino.* local after toLotus, skip DOM-004
-        # (DOM-025 still covers missing unwrap; lotus recycle is required).
-        before = unit.body[max(0, match.start() - 120) : match.start()]
-        if re.search(r"lotus\.domino\.\w+\s+\w+", before, re.I) and RE_TO_LOTUS.search(
-            unit.body
+    for match in RE_RECYCLE_CALL.finditer(body):
+        var = match.group(1)
+        # After toLotus unwrap, recycle on lotus.domino-typed locals is correct (not DOM-004).
+        if has_to_lotus and re.search(
+            rf"\blotus\.domino\.\w+\s+{re.escape(var)}\b", body
         ):
-            # Still flag if receiver looks like an ODA-typed variable name from imports-only context
-            pass
+            continue
         findings.append(
             _finding(
                 "DOM-004",
                 unit,
-                line=_line_of(unit.body, match.start(), unit.start_line),
-                evidence=_snippet(unit.body, match.start()),
+                line=_line_of(body, match.start(), unit.start_line),
+                evidence=_snippet(body, match.start()),
                 confidence=97,
                 impact=(
                     "Calling .recycle() on org.openntf.domino.* wrappers is a CRITICAL bug. "
                     "It induces lock contention on SessionModerator during "
                     "WrapperFactory.recycle() / Factory.termThread(), causing Java thread "
                     "deadlocks and abnormal HTTP process terminations. ODA already manages "
-                    "native handle lifecycles — remove manual recycle on ODA wrappers."
+                    "native handle lifecycles — remove manual recycle on ODA wrappers "
+                    "(PATTERN A). For heavy loops, unwrap with toLotus() first (PATTERN B / DOM-025)."
                 ),
                 remediation=remediation_template("DOM-004", unit.language),
-                action="Remove .recycle() on ODA wrappers; let ODA dispose at request/thread end.",
+                action=(
+                    "PATTERN A: Remove .recycle() on ODA wrappers; let ODA dispose at request "
+                    "teardown. Do not add try/finally for ODA recycle."
+                ),
                 handle_lifecycle_warning=(
-                    f"Line {_line_of(unit.body, match.start(), unit.start_line)}: "
+                    f"Line {_line_of(body, match.start(), unit.start_line)}: "
                     "ODA wrapper .recycle() risks SessionModerator deadlock."
                 ),
             )
@@ -447,7 +451,7 @@ def detect_dom004(unit: CodeUnit) -> list[Finding]:
 
 
 def detect_dom025(unit: CodeUnit) -> list[Finding]:
-    """ODA collection/view loops that recycle wrappers or skip toLotus() unwrapping."""
+    """ODA heavy loops: recycle wrappers without toLotus, or iterate without unwrapping."""
     if not _java_like_unit(unit):
         return []
     body = unit.body or ""
@@ -455,48 +459,70 @@ def detect_dom025(unit: CodeUnit) -> list[Finding]:
         return []
     if not RE_LOOP.search(body):
         return []
-    # Need a collection / view walk signal
-    if not re.search(
+    # Collection / view / navigator / forEach walk signal
+    walk = re.search(
         r"getNext(?:Document|Entry|Category)\s*\(|getFirst(?:Document|Entry)\s*\(|"
-        r"getAllEntries|getAllDocumentsByKey|createViewNav|FTSearch|\.iterator\s*\(",
+        r"getAllEntries|getAllDocumentsByKey|createViewNav|FTSearch|\.iterator\s*\(|"
+        r"\.(?:forEach|forEachEntry)\s*\(",
         body,
         re.I,
-    ):
+    )
+    if not walk:
         return []
 
     has_to_lotus = bool(RE_TO_LOTUS.search(body))
-    recycle_in_loopish = bool(RE_RECYCLE_CALL.search(body))
+    if has_to_lotus:
+        # Correct Jesse Gallagher unwrap — lotus.domino recycle inside is expected
+        return []
 
-    # Primary: recycle present without toLotus unwrap (deadlock + wrong pattern)
-    if recycle_in_loopish and not has_to_lotus:
-        match = RE_RECYCLE_CALL.search(body)
-        assert match is not None
-        line = _line_of(body, match.start(), unit.start_line)
-        return [
-            _finding(
-                "DOM-025",
-                unit,
-                line=line,
-                evidence=_snippet(body, match.start()),
-                confidence=94,
-                in_loop=True,
-                impact=(
-                    "ODA view/collection loop calls .recycle() on wrappers without "
-                    "Factory.getWrapperFactory().toLotus(...). Manual ODA recycle in hot loops "
-                    "deadlocks SessionModerator and does not safely free BLK_OPENED_NOTE handles. "
-                    "Unwrap to lotus.domino.* then recycle the lotus Document/Entry in finally."
-                ),
-                remediation=remediation_template("DOM-025", unit.language, has_loop=True),
-                action="Unwrap with toLotus(odaView); recycle lotus.domino handles — never ODA wrappers.",
-                handle_lifecycle_warning=(
-                    f"Line {line}: ODA loop recycle without toLotus() — deadlock anti-pattern."
-                ),
-            )
-        ]
+    recycle_match = RE_RECYCLE_CALL.search(body)
+    # Prefer recycle site when present (deadlock path); else walk site (missing unwrap)
+    if recycle_match:
+        pos = recycle_match.start()
+        confidence = 94
+        impact = (
+            "ODA view/collection loop calls .recycle() on wrappers without "
+            "Factory.getWrapperFactory().toLotus(...). Manual ODA recycle in hot loops "
+            "deadlocks SessionModerator. Unwrap to lotus.domino.* then recycle lotus "
+            "Document/ViewEntry/columnValues Vector handles in finally (Jesse Gallagher PATTERN B)."
+        )
+        warning = (
+            f"Line {_line_of(body, pos, unit.start_line)}: "
+            "ODA loop recycle without toLotus() — SessionModerator deadlock anti-pattern."
+        )
+    else:
+        pos = walk.start()
+        confidence = 90
+        impact = (
+            "Heavy ODA view/collection walk without Factory.getWrapperFactory().toLotus(...). "
+            "Relying on ODA auto-teardown in high-volume loops causes GC churn, JNI handle "
+            "accumulation, and SessionModerator contention. Unwrap the parent ODA object to "
+            "lotus.domino.*, iterate pure lotus handles, and .recycle() Document/ViewEntry/"
+            "columnValues in finally (Jesse Gallagher PATTERN B)."
+        )
+        warning = (
+            f"Line {_line_of(body, pos, unit.start_line)}: "
+            "ODA heavy loop missing toLotus() unwrap (DOM-025)."
+        )
 
-    # Secondary: heavy ODA walk with recycle AFTER toLotus is fine; without either
-    # recycle or toLotus, ODA auto-lifecycle is OK — do not flag missing recycle.
-    return []
+    line = _line_of(body, pos, unit.start_line)
+    return [
+        _finding(
+            "DOM-025",
+            unit,
+            line=line,
+            evidence=_snippet(body, pos),
+            confidence=confidence,
+            in_loop=True,
+            impact=impact,
+            remediation=remediation_template("DOM-025", unit.language, has_loop=True),
+            action=(
+                "PATTERN B: Unwrap with Factory.getWrapperFactory().toLotus(odaView); "
+                "recycle lotus.domino Document/Entry/columnValues — never ODA wrappers."
+            ),
+            handle_lifecycle_warning=warning,
+        )
+    ]
 
 
 def detect_dom005(unit: CodeUnit) -> list[Finding]:
