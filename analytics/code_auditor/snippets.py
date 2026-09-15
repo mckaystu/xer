@@ -26,7 +26,8 @@ PROBLEM_BREAKDOWNS: dict[str, str] = {
     "DOM-004": (
         "Calling `.recycle()` on org.openntf.domino.* wrappers is a CRITICAL deadlock bug "
         "(SessionModerator / WrapperFactory.recycle / Factory.termThread). ODA auto-manages "
-        "native handles — remove manual recycle on ODA objects."
+        "native handles — PATTERN A: remove manual recycle on one-shot ODA use; PATTERN B "
+        "(loops): unwrap with toLotus() then recycle lotus.domino handles only."
     ),
     "DOM-005": (
         "Raw `lotus.domino` objects are mixed with ODA APIs without `Factory.fromLotus()`, "
@@ -141,8 +142,9 @@ PROBLEM_BREAKDOWNS: dict[str, str] = {
     ),
     "DOM-025": (
         "ODA view/collection loop recycles org.openntf.domino wrappers without unwrapping via "
-        "Factory.getWrapperFactory().toLotus(...). Causes SessionModerator deadlock; unwrap to "
-        "lotus.domino then recycle lotus Document/Entry handles in finally."
+        "Factory.getWrapperFactory().toLotus(...). Causes SessionModerator deadlock; apply "
+        "Jesse Gallagher PATTERN B: unwrap to lotus.domino then recycle lotus Document/Entry "
+        "handles in finally."
     ),
     "LS-DOM-008": (
         "Search / FTSearch inside a LotusScript loop without Delete of the returned collection."
@@ -329,20 +331,17 @@ REMEDIATION_GUIDES: dict[str, dict[str, str]] = {
     },
     "DOM-004": {
         "java": (
-            "Remove .recycle() on org.openntf.domino.* wrappers — ODA owns lifecycle. "
-            "For high-volume loops, unwrap with toLotus() and recycle lotus.domino handles only."
+            "PATTERN A (one-shot): Remove .recycle() on org.openntf.domino.* — ODA owns lifecycle; "
+            "do not add try/finally for recycle. PATTERN B (loops): unwrap with "
+            "Factory.getWrapperFactory().toLotus(...) and recycle lotus.domino handles only "
+            "(Jesse Gallagher pattern)."
         ),
     },
     "DOM-025": {
         "java": (
-            "lotus.domino.View lotusView = Factory.getWrapperFactory().toLotus(odaView);\n"
-            "lotus.domino.Document doc = lotusView.getFirstDocument();\n"
-            "while (doc != null) {\n"
-            "  lotus.domino.Document next = lotusView.getNextDocument(doc);\n"
-            "  try { /* work */ } finally { doc.recycle(); }\n"
-            "  doc = next;\n"
-            "}\n"
-            "// Never call odaView.recycle() / odaDoc.recycle()"
+            "PATTERN B — Jesse Gallagher Inner-Loop Unwrapping: "
+            "lotus.domino.View lotusView = Factory.getWrapperFactory().toLotus(odaView); "
+            "iterate lotus handles; try/finally { doc.recycle(); }. Never recycle ODA wrappers."
         ),
     },
     "LS-DOM-008": {
@@ -492,6 +491,74 @@ def is_java_like(language: str | None) -> bool:
     return normalize_language(language) in {"java", "javascript", "ssjs", "xpages"}
 
 
+def oda_refactoring_remediation(
+    language: str | None,
+    *,
+    has_loop: bool = False,
+    function_name: str = "",
+    view_var: str = "odaView",
+    doc_var: str = "doc",
+) -> str:
+    """ODA To-Be for DOM-004 / DOM-025 — Pattern A (one-shot) or B (inner-loop).
+
+    PATTERN A (single-shot): remove manual ``.recycle()``; ODA tears down at request end.
+    PATTERN B (loop/collection): Jesse Gallagher unwrap via ``toLotus()``, then recycle
+    pure ``lotus.domino`` handles in ``finally`` — never recycle ODA wrappers.
+    """
+    lang = normalize_language(language)
+    ssjs = lang in {"ssjs", "javascript", "xpages"}
+    decl = "var " if ssjs else ""
+    fname = (function_name or "").strip()
+    header = (
+        f"// Contextual ODA remediation for {fname}\n" if fname else ""
+    )
+
+    if has_loop:
+        # Pattern B — Jesse Gallagher Inner-Loop Unwrapping
+        return (
+            f"{header}"
+            "// PATTERN B (DOM-025): Jesse Gallagher Inner-Loop Unwrapping Pattern\n"
+            "// ODA auto-teardown in heavy loops causes GC pressure + SessionModerator contention.\n"
+            "// Never call .recycle() on org.openntf.domino wrappers — unwrap first.\n"
+            f"{decl}{view_var} = db.getView(\"MyView\");  // ODA view (adapt name)\n"
+            f"{decl}lotusView = org.openntf.domino.utils.Factory.getWrapperFactory()"
+            f".toLotus({view_var});\n"
+            "\n"
+            f"{decl}{doc_var} = lotusView.getFirstDocument();\n"
+            f"while ({doc_var} != null) {{\n"
+            f"  {decl}nextDoc = lotusView.getNextDocument({doc_var});\n"
+            "  try {\n"
+            f"    // Keep existing per-document work from {fname or 'this routine'}\n"
+            "  } finally {\n"
+            f"    if ({doc_var} != null) {{ {doc_var}.recycle(); }}  // lotus.domino only\n"
+            "  }\n"
+            f"  {doc_var} = nextDoc;\n"
+            "}\n"
+            f"// Do NOT: {view_var}.recycle() / odaDoc.recycle()"
+        )
+
+    # Pattern A — Standard one-shot ODA
+    if ssjs:
+        return (
+            f"{header}"
+            "// PATTERN A (DOM-004): Standard / One-Shot ODA Remediation\n"
+            "// Remove all manual .recycle() on org.openntf.domino.* — ODA disposes at request teardown.\n"
+            "// Do NOT wrap in try/finally solely for recycle.\n"
+            "var doc = db.getDocumentByUNID(unid);\n"
+            "var subject = doc.getItemValueString(\"Subject\");\n"
+            "// Keep existing business logic; delete any doc.recycle() / finally-recycle blocks"
+        )
+    return (
+        f"{header}"
+        "// PATTERN A (DOM-004): Standard / One-Shot ODA Remediation\n"
+        "// Remove all manual .recycle() on org.openntf.domino.* — ODA disposes at request teardown.\n"
+        "// Do NOT wrap in try/finally solely for recycle.\n"
+        "org.openntf.domino.Document doc = db.getDocumentByUNID(unid);\n"
+        "String subject = doc.getItemValueString(\"Subject\");\n"
+        "// Keep existing business logic; delete any doc.recycle() / finally-recycle blocks"
+    )
+
+
 def remediation_template(
     rule_id: str,
     language: str | None,
@@ -506,6 +573,10 @@ def remediation_template(
     lang = normalize_language(language)
     ls = lang == "lotusscript"
     looped = True if has_loop is None else bool(has_loop)
+
+    # DOM-004 / DOM-025: control-flow decides Pattern A (one-shot) vs B (loop)
+    if rule_id in {"DOM-004", "DOM-025"} and not ls:
+        return oda_refactoring_remediation(language, has_loop=looped)
 
     # Non-loop linear templates (one-shot helpers like EncodeBase64)
     linear_ls: dict[str, str] = {
@@ -1391,6 +1462,22 @@ def contextual_remediation(
     label = language_label(language)
     rid = rule_id or ("LS-DOM-001" if ls and looped else "DOM-002" if looped else "DOM-010")
 
+    # ODA deadlock rules: Pattern A (one-shot) vs Pattern B (loop) — never recycle ODA wrappers
+    if rid in {"DOM-004", "DOM-025"} and not ls:
+        walk = _detect_doc_walk(body, lotusscript=False)
+        view_var = "odaView"
+        doc_var = "doc"
+        if walk:
+            doc_var, coll, _next = walk
+            view_var = coll if coll else "odaView"
+        return oda_refactoring_remediation(
+            language,
+            has_loop=looped or bool(walk),
+            function_name=fname,
+            view_var=view_var,
+            doc_var=doc_var,
+        )
+
     # Too little signal → canned template
     if not vars_ and not _detect_doc_walk(body, lotusscript=ls):
         return remediation_template(rid, language, has_loop=looped)
@@ -1509,6 +1596,23 @@ def contextual_remediation_guide(
         if ls
         else "in a `finally` (or equivalent) before the loop advances / the method returns"
     )
+
+    rid = rule_id or "DOM-010"
+    if rid in {"DOM-004", "DOM-025"} and not ls:
+        if has_loop:
+            return (
+                f"In `{fname}`, " if fname else ""
+            ) + (
+                "use PATTERN B (Jesse Gallagher): unwrap the ODA view/collection with "
+                "`Factory.getWrapperFactory().toLotus(...)`, iterate pure `lotus.domino` handles, "
+                "and `.recycle()` those lotus handles in `finally`. Never `.recycle()` ODA wrappers."
+            )
+        return (
+            f"In `{fname}`, " if fname else ""
+        ) + (
+            "use PATTERN A: remove all `.recycle()` calls on `org.openntf.domino.*` objects — "
+            "ODA disposes handles at request teardown. Do not add try/finally solely for recycle."
+        )
 
     if fname and vars_:
         if has_loop:

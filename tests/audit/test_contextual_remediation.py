@@ -75,3 +75,62 @@ def test_guide_lists_unclean_vars():
     assert "`getAttachmentData`" in guide
     assert "`attachItem`" in guide
     assert "`embObj`" in guide
+
+
+def test_oda_pattern_a_one_shot_removes_recycle():
+    to_be = contextual_remediation(
+        language="java",
+        function_name="loadSubject",
+        body=(
+            "org.openntf.domino.Document doc = db.getDocumentByUNID(unid);\n"
+            "doc.recycle();\n"
+        ),
+        allocated_vars=["doc"],
+        unclean_vars=[],
+        has_loop=False,
+        rule_id="DOM-004",
+    )
+    assert "PATTERN A" in to_be
+    assert "Remove all manual .recycle()" in to_be or "remove" in to_be.lower()
+    assert "try {" not in to_be
+    assert "toLotus" not in to_be
+    guide = contextual_remediation_guide(
+        language="java",
+        function_name="loadSubject",
+        has_loop=False,
+        rule_id="DOM-004",
+    )
+    assert "PATTERN A" in guide
+
+
+def test_oda_pattern_b_loop_uses_jesse_gallagher_tolotus():
+    to_be = contextual_remediation(
+        language="java",
+        function_name="walkOdaView",
+        body=(
+            "org.openntf.domino.View odaView = db.getView(\"Orders\");\n"
+            "org.openntf.domino.Document doc = odaView.getFirstDocument();\n"
+            "while (doc != null) {\n"
+            "  org.openntf.domino.Document next = odaView.getNextDocument(doc);\n"
+            "  doc.recycle();\n"
+            "  doc = next;\n"
+            "}\n"
+        ),
+        allocated_vars=["doc", "odaView"],
+        unclean_vars=["doc"],
+        has_loop=True,
+        rule_id="DOM-025",
+    )
+    assert "PATTERN B" in to_be
+    assert "Jesse Gallagher" in to_be
+    assert "toLotus" in to_be
+    assert "doc.recycle()" in to_be
+    assert "odaView.recycle()" not in to_be or "Do NOT" in to_be
+    guide = contextual_remediation_guide(
+        language="java",
+        function_name="walkOdaView",
+        has_loop=True,
+        rule_id="DOM-025",
+    )
+    assert "PATTERN B" in guide
+    assert "toLotus" in guide

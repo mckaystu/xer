@@ -49,7 +49,25 @@ causing Java thread deadlocks and abnormal HTTP terminations.
 - DOM-004: any direct `.recycle()` on ODA wrappers → ALWAYS VERIFIED (CRITICAL). Never FP.
 - DOM-025: ODA collection/view loops that manually recycle ODA objects OR iterate heavy
   collections without unwrapping via toLotus() → ALWAYS VERIFIED (CRITICAL). Never FP.
-Safe high-volume pattern (Jesse Gallagher):
+
+### ODA REMEDIATION ENGINE (suggested_remediation) — REQUIRED
+Detect LOOP/COLLECTION iteration vs SINGLE-SHOT, then emit exactly one pattern:
+
+PATTERN A — DOM-004 Standard / One-Shot (non-loop, single-document):
+- ODA auto-manages handles at request teardown.
+- Remove all manual `.recycle()` on ODA objects. Do NOT wrap in try/finally for recycle.
+- Example: org.openntf.domino.Document doc = db.getDocumentByUNID(unid);
+  String subject = doc.getItemValueString("Subject");
+
+PATTERN B — DOM-025 Jesse Gallagher Inner-Loop Unwrapping (views/collections/navigators,
+while(doc!=null), high-volume / background):
+- ODA auto-teardown in heavy loops → GC pressure + SessionModerator contention.
+- Unwrap parent: lotus.domino.View lotusView =
+    org.openntf.domino.utils.Factory.getWrapperFactory().toLotus(odaView);
+- Iterate pure lotus.domino handles; try/finally { doc.recycle(); } on lotus handles only.
+- Cite "Jesse Gallagher" in the remediation comment. Never recycle ODA wrappers.
+
+Safe high-volume sketch:
   lotus.domino.View lotusView = Factory.getWrapperFactory().toLotus(odaView);
   // then recycle lotus.domino.Document handles in finally — never the ODA wrapper
 
@@ -87,7 +105,7 @@ Return ONLY valid JSON:
       "reasoning": "1-3 sentences; quote evidence",
       "in_loop": true,
       "evidence_quote": "short code excerpt proving the verdict",
-      "suggested_remediation": "lotus try/finally OR toLotus() unwrap pattern"
+      "suggested_remediation": "PATTERN A remove ODA recycle | PATTERN B toLotus+lotus recycle | lotus try/finally"
     }
   ]
 }
@@ -177,6 +195,10 @@ High-precision patterns:
 - ODA wrappers calling .recycle() (SessionModerator deadlock — DOM-004/025)
 - ODA collection loops recycling wrappers without Factory.getWrapperFactory().toLotus()
 
+Remediation field: LOOP → PATTERN B (Jesse Gallagher toLotus + lotus recycle in finally);
+SINGLE-SHOT ODA → PATTERN A (remove .recycle(), no try/finally for recycle);
+lotus.domino leaks → try/finally recycle.
+
 Do NOT report:
 - Missing recycle on pure org.openntf.domino.* (ODA auto-manages lifecycle)
 - Missing recycle on platform globals: session, XPages database, getCurrentDatabase(), dominoNAF
@@ -195,7 +217,7 @@ Return ONLY valid JSON:
       "unclean_var": "doc",
       "evidence": "short excerpt",
       "technical_impact": "BLK_OPENED_NOTE leak OR SessionModerator deadlock",
-      "remediation": "lotus finally recycle OR toLotus() unwrap pattern",
+      "remediation": "PATTERN A|B for ODA, else lotus finally recycle",
       "action_required": "short action",
       "rationale": "cite framework + cleanup status",
       "reasoning": "why static rules missed this"
@@ -217,6 +239,8 @@ Tasks:
 2) Risk escalation: escalate ONLY when a finding is already a VERIFIED loop leak AND the
    element is a scheduled/background agent (Initialize / agent). Do not escalate UI one-shots.
 3) To-Be sanity: when suggesting remediation, preserve return values and business logic.
+   For ODA units: SINGLE-SHOT → PATTERN A (remove ODA .recycle()); LOOP/COLLECTION →
+   PATTERN B (Jesse Gallagher toLotus unwrap + recycle lotus.domino handles in finally).
 
 Return ONLY valid JSON:
 {
