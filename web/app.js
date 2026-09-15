@@ -1585,11 +1585,20 @@ function findingFilterBucket(f) {
   return "all";
 }
 
+function isOdaDeadlockFinding(f) {
+  const rid = String(f.rule_id || "");
+  return rid === "DOM-004" || rid === "DOM-025";
+}
+
 function findingCategoryBucket(f) {
   const rid = String(f.rule_id || "");
   const cat = String(f.category || "");
   const lang = String(f.language || "").toLowerCase();
   const isLotus = lang.includes("lotus") || lang === "ls" || lang === "lss" || lang === "notes";
+  if (isOdaDeadlockFinding(f) || cat.includes("Framework Conflicts")) {
+    // DOM-004 / DOM-025 first — dedicated ODA deadlock filter
+    if (isOdaDeadlockFinding(f)) return "deadlock";
+  }
   if (rid.startsWith("PERF-") || cat.includes("Performance") || cat.includes("NIF")) {
     return "performance";
   }
@@ -1626,6 +1635,7 @@ function filterAuditFindings(findings, filter) {
       if (filter === "verified") return bucket === "verified";
       if (filter === "false_positive") return bucket === "false_positive";
       if (filter === "blind_spot") return bucket === "blind_spot";
+      if (filter === "deadlock") return isOdaDeadlockFinding(f) && !f.is_false_positive;
       if (filter === "handle") return cat === "handle" && !f.is_false_positive;
       if (filter === "performance") return cat === "performance" && !f.is_false_positive;
       if (filter === "formula") return cat === "formula" && !f.is_false_positive;
@@ -1688,6 +1698,9 @@ function renderCodeAuditCard(audit) {
       const cat = findingCategoryBucket(f);
       const badges = [];
       if (cat === "performance") badges.push(`<span class="ai-badge ai-badge-perf">Performance &amp; NIF</span>`);
+      if (cat === "deadlock" || isOdaDeadlockFinding(f)) {
+        badges.push(`<span class="ai-badge ai-badge-deadlock">ODA Deadlock</span>`);
+      }
       if (bucket === "blind_spot") badges.push(`<span class="ai-badge ai-badge-blind">Blind Spot</span>`);
       else if (bucket === "false_positive") badges.push(`<span class="ai-badge ai-badge-fp">False Positive</span>`);
       else if (bucket === "verified") badges.push(`<span class="ai-badge ai-badge-verified">AI Verified</span>`);
@@ -1721,6 +1734,7 @@ function renderCodeAuditCard(audit) {
       ? aiSum.blind_spots
       : findings.filter((f) => findingFilterBucket(f) === "blind_spot").length;
   const handleCount = findings.filter((f) => findingCategoryBucket(f) === "handle" && !f.is_false_positive).length;
+  const deadlockCount = findings.filter((f) => isOdaDeadlockFinding(f) && !f.is_false_positive).length;
   const perfCount = findings.filter((f) => findingCategoryBucket(f) === "performance" && !f.is_false_positive).length;
   const formulaCount = findings.filter((f) => findingCategoryBucket(f) === "formula" && !f.is_false_positive).length;
   const ownershipCount = findings.filter((f) => findingCategoryBucket(f) === "ownership" && !f.is_false_positive).length;
@@ -1751,6 +1765,7 @@ function renderCodeAuditCard(audit) {
             ${filterBtn("all", "All Findings", findings.length)}
             ${filterBtn("high_confidence", `Conf ≥ ${AI_CONFIDENCE_MIN_UI}%`, highConfCount)}
             ${filterBtn("handle", "Handle Exhaustion (Java/JS)", handleCount)}
+            ${filterBtn("deadlock", "ODA Deadlock (DOM-004/025)", deadlockCount)}
             ${filterBtn("ownership", "Ownership", ownershipCount)}
             ${filterBtn("performance", "Performance & NIF", perfCount)}
             ${filterBtn("formula", "Formula / Design", formulaCount)}

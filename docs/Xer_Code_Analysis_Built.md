@@ -225,7 +225,7 @@ python3 upgrade_scan.py ./dxl_input --json
 
 ## UI (Code Analysis tab)
 
-- Findings table with filters: **Handle Leaks | Performance & NIF | AI Discovered**
+- Findings table with filters: **Handle Leaks | ODA Deadlock (DOM-004/025) | Performance & NIF | AI Discovered**
 - Severity pills and AI validation banners (`VERIFIED`, `FALSE_POSITIVE`, `VERIFIED_NON_LOOP`, blind spots)
 - Row deep-dive: Problem Breakdown, Remediation Guide, As-Is (hit line highlight), To-Be template
 - PERF findings show a **Performance impact** callout

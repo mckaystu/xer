@@ -1231,6 +1231,10 @@ th { color: var(--muted); font-weight: 500; }
   background: rgba(91, 159, 212, 0.2);
   color: #8ec0e8;
 }
+.ai-badge-deadlock {
+  background: rgba(200, 60, 60, 0.22);
+  color: #f0a0a0;
+}
 
 .perf-callout {
   margin: 12px 0;
